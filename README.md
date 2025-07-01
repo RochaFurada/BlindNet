@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/architecture.svg" " alt="Diagrama BlindNet">
+  <img src="docs/architecture.png" " alt="Diagrama BlindNet">
 </p>
 
 <h1 align="center">🔒 BlindNet Core</h1>
