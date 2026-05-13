@@ -1,0 +1,53 @@
+# ESP-IDF / CMake build outputs
+build/
+**/build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# ESP-IDF generated files
+sdkconfig.old
+managed_components/
+dependencies.lock.tmp
+
+# Firmware artifacts
+*.bin
+*.elf
+*.map
+*.hex
+*.lst
+*.uf2
+
+# Object and library files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.orig
+.cache/
+.pytest_cache/
+
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
