@@ -61,6 +61,13 @@ esp_err_t active_substance_set_ciphertext(
     size_t ciphertext_len
 );
 
+esp_err_t active_substance_validate_envelope(const active_substance_t *substance);
+
+/*
+ * Backward-compatible alias. This validates only the encrypted AS envelope:
+ * version, cipher id and ciphertext length. It does not decrypt or validate
+ * the plaintext command.
+ */
 esp_err_t active_substance_validate(const active_substance_t *substance);
 
 esp_err_t active_substance_hash(

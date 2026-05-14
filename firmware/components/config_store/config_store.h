@@ -11,6 +11,8 @@ extern "C" {
 #define CONFIG_STORE_SSID_LEN 32
 #define CONFIG_STORE_PASS_LEN 64
 #define CONFIG_STORE_HOST_LEN 64
+#define CONFIG_STORE_PUBLIC_KEY_MAX_LEN 512
+#define CONFIG_STORE_KEY_ID_LEN 16
 
 typedef struct {
     uint32_t magic;
@@ -18,6 +20,9 @@ typedef struct {
 
     uint32_t zone_id;
     uint32_t guardian_id;
+
+    char issuer_public_key_pem[CONFIG_STORE_PUBLIC_KEY_MAX_LEN];
+    uint8_t issuer_key_id[CONFIG_STORE_KEY_ID_LEN];
 
     char sta_ssid[CONFIG_STORE_SSID_LEN];
     char sta_password[CONFIG_STORE_PASS_LEN];

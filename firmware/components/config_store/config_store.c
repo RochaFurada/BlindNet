@@ -13,7 +13,7 @@ static const char *NVS_NS = "zoneguard";
 static const char *NVS_KEY = "config_blob";
 
 #define ZG_CONFIG_MAGIC 0x5A474346u
-#define ZG_CONFIG_VERSION 1u
+#define ZG_CONFIG_VERSION 2u
 
 static bool s_initialized = false;
 

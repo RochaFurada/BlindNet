@@ -23,7 +23,6 @@ void action_pill_init(action_pill_t *pill)
 esp_err_t action_pill_set_encrypted(
     action_pill_t *pill,
     capsule_pill_action_class_t action_class,
-    uint8_t max_hops,
     uint32_t issued_ms,
     uint32_t expires_ms,
     const uint8_t network_id[CAPSULE_PILL_NETWORK_ID_LEN],
@@ -53,7 +52,6 @@ esp_err_t action_pill_set_encrypted(
     err = capsule_pill_configure(
         &pill->capsule,
         action_class,
-        max_hops,
         issued_ms,
         expires_ms,
         network_id,
@@ -86,7 +84,6 @@ esp_err_t action_pill_make_relay_copy(
 {
     if (!input || !output) return ESP_ERR_INVALID_ARG;
     if (input->version != ACTION_PILL_VERSION) return ESP_ERR_INVALID_VERSION;
-    if (input->hop_count >= input->capsule.max_hops) return ESP_ERR_INVALID_STATE;
 
     *output = *input;
     output->version = ACTION_PILL_VERSION;
@@ -116,9 +113,8 @@ esp_err_t action_pill_precheck_for_relay(
 {
     if (!pill) return ESP_ERR_INVALID_ARG;
     if (pill->version != ACTION_PILL_VERSION) return ESP_ERR_INVALID_VERSION;
-    if (pill->hop_count > pill->capsule.max_hops) return ESP_ERR_INVALID_ARG;
 
-    esp_err_t err = active_substance_validate(&pill->active);
+    esp_err_t err = active_substance_validate_envelope(&pill->active);
     if (err != ESP_OK) return err;
 
     return capsule_pill_validate_basic(&pill->capsule, now_ms);

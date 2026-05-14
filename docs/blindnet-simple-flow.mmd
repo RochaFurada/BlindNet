@@ -1,0 +1,62 @@
+flowchart TD
+    %% BlindNet - fluxo geral simplificado
+
+    Boot["ESP32 Guardian liga"]
+    HasConfig{"Existe configuracao<br/>salva no NVS?"}
+
+    SetupAP["Abre modo setup<br/>AP: BlindNet_Setup"]
+    AdminPhone["Celular/notebook do admin<br/>entra no AP de setup"]
+    SetupPage["Pagina local<br/>http://192.168.4.1"]
+    SaveConfig["Salva configuracao<br/>Wi-Fi, AP local, zona, chaves"]
+    Reboot["Reinicia"]
+
+    NormalMode["Modo normal"]
+    LocalAP["Abre AP protegido<br/>para dispositivos IoT"]
+    STA["Conecta como STA<br/>ao roteador/uplink opcional"]
+    Security["Ativa servicos locais<br/>firewall, DNS, policy,<br/>rate limit, quarentena"]
+    LocalDevices["Dispositivos IoT<br/>conectam no AP do Guardian"]
+    MQTTLocal["Controle/MQTT local<br/>dentro da zona"]
+
+    UserPhone["Celular do usuario"]
+    BuildPill["App cria Action Pill<br/>AS cifrado + CP assinado + AP externo"]
+    NearbyGuardian["Guardian mais proximo<br/>recebe via Bluetooth"]
+
+    Stomach["Stomach do Guardian<br/>calcula digest do CP"]
+    Seen{"CP ja passou<br/>por este Guardian?"}
+    Drop["Descarta<br/>anti-loop / anti-replay"]
+    Relay["Duplica/reembala AP<br/>e encaminha imediatamente"]
+    ValidateLater["Depois valida CP/AS<br/>e tenta abrir AS localmente"]
+    IsTarget{"Conseguiu abrir AS<br/>com chave de dispositivo local?"}
+
+    NextGuardian["Proximo Guardian<br/>recebe via Bluetooth"]
+    TargetGuardian["Guardian correto<br/>descobre que consegue abrir o AS"]
+    LocalPolicy["Confere policy local<br/>risco, estado, permissao"]
+    Execute["Executa comando<br/>no dispositivo alvo"]
+
+    Telemetry["Telemetria/eventos<br/>serial ou UDP"]
+
+    Boot --> HasConfig
+    HasConfig -- "nao" --> SetupAP --> AdminPhone --> SetupPage --> SaveConfig --> Reboot --> Boot
+    HasConfig -- "sim" --> NormalMode
+
+    NormalMode --> LocalAP
+    NormalMode --> STA
+    NormalMode --> Security
+    LocalAP --> LocalDevices --> MQTTLocal
+    STA --> Internet["Roteador / Internet<br/>opcional"]
+    Security --> Telemetry
+
+    UserPhone --> BuildPill --> NearbyGuardian
+    NearbyGuardian --> Stomach --> Seen
+    Seen -- "sim" --> Drop
+    Seen -- "nao" --> Relay --> NextGuardian
+    Seen -- "nao, em paralelo" --> ValidateLater --> IsTarget
+
+    IsTarget -- "nao" --> Continue["Nao executa<br/>apenas ja encaminhou"]
+    IsTarget -- "sim" --> TargetGuardian --> LocalPolicy
+    LocalPolicy -- "bloqueado" --> Drop
+    LocalPolicy -- "permitido" --> Execute --> MQTTLocal --> LocalDevices
+
+    NextGuardian --> Stomach
+
+    Telemetry -. "registra estado,<br/>eventos e riscos" .-> NormalMode

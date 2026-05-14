@@ -46,8 +46,8 @@ static esp_err_t capsule_update_signed_canonical(
 
     update_u8(ctx, capsule->version);
     update_u8(ctx, capsule->flags);
-    update_u8(ctx, capsule->max_hops);
     update_u8(ctx, capsule->action_class);
+    update_u8(ctx, capsule->reserved0);
     update_u32_le(ctx, capsule->issued_ms);
     update_u32_le(ctx, capsule->expires_ms);
     mbedtls_md_update(ctx, capsule->network_id, sizeof(capsule->network_id));
@@ -89,7 +89,6 @@ void capsule_pill_init(capsule_pill_t *capsule)
 
     memset(capsule, 0, sizeof(*capsule));
     capsule->version = CAPSULE_PILL_VERSION;
-    capsule->max_hops = 3;
     capsule->action_class = CAPSULE_PILL_ACTION_UNKNOWN;
     capsule->signature_alg = CAPSULE_PILL_SIGNATURE_NONE;
 }
@@ -97,7 +96,6 @@ void capsule_pill_init(capsule_pill_t *capsule)
 esp_err_t capsule_pill_configure(
     capsule_pill_t *capsule,
     capsule_pill_action_class_t action_class,
-    uint8_t max_hops,
     uint32_t issued_ms,
     uint32_t expires_ms,
     const uint8_t network_id[CAPSULE_PILL_NETWORK_ID_LEN],
@@ -108,7 +106,7 @@ esp_err_t capsule_pill_configure(
     if (!capsule || !network_id || !nonce || !issuer_key_id) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (max_hops == 0 || issued_ms == 0 || expires_ms <= issued_ms) {
+    if (issued_ms == 0 || expires_ms <= issued_ms) {
         return ESP_ERR_INVALID_ARG;
     }
     if (action_class == CAPSULE_PILL_ACTION_UNKNOWN) {
@@ -117,8 +115,8 @@ esp_err_t capsule_pill_configure(
 
     capsule->version = CAPSULE_PILL_VERSION;
     capsule->flags = 0;
-    capsule->max_hops = max_hops;
     capsule->action_class = (uint8_t)action_class;
+    capsule->reserved0 = 0;
     capsule->issued_ms = issued_ms;
     capsule->expires_ms = expires_ms;
     memcpy(capsule->network_id, network_id, CAPSULE_PILL_NETWORK_ID_LEN);
@@ -127,6 +125,7 @@ esp_err_t capsule_pill_configure(
 
     capsule->signature_alg = CAPSULE_PILL_SIGNATURE_NONE;
     capsule->signature_len = 0;
+    memset(capsule->reserved1, 0, sizeof(capsule->reserved1));
     memset(capsule->signature, 0, sizeof(capsule->signature));
 
     return ESP_OK;
@@ -208,8 +207,10 @@ esp_err_t capsule_pill_validate_basic(
 {
     if (!capsule) return ESP_ERR_INVALID_ARG;
     if (capsule->version != CAPSULE_PILL_VERSION) return ESP_ERR_INVALID_VERSION;
-    if (capsule->max_hops == 0) return ESP_ERR_INVALID_ARG;
     if (capsule->action_class == CAPSULE_PILL_ACTION_UNKNOWN) return ESP_ERR_INVALID_ARG;
+    if (capsule->reserved0 != 0 || !bytes_all_zero(capsule->reserved1, sizeof(capsule->reserved1))) {
+        return ESP_ERR_INVALID_ARG;
+    }
     if (capsule->issued_ms == 0 || capsule->expires_ms <= capsule->issued_ms) {
         return ESP_ERR_INVALID_ARG;
     }

@@ -17,7 +17,7 @@
 static const char *TAG = "swarm_agent";
 
 #define SWARM_MAGIC       0x5A47
-#define SWARM_VERSION     1
+#define SWARM_VERSION     2
 #define SWARM_RX_STACK    4096
 #define SWARM_TX_STACK    4096
 #define SWARM_TASK_PRIO   5
@@ -71,7 +71,6 @@ static void load_default_config(swarm_agent_config_t *config)
     config->zone_id = 1;
     config->udp_port = 4747;
     config->broadcast_addr = "255.255.255.255";
-    config->max_hops = 3;
     config->hello_interval_ms = 5000;
     config->zone_state_interval_ms = 7000;
     config->verify_mode = SWARM_VERIFY_DISABLED;
@@ -174,7 +173,7 @@ static esp_err_t make_frame(swarm_msg_type_t type, uint32_t target_id,
     out_frame->origin_id = s_config.guardian_id;
     out_frame->target_id = target_id;
     out_frame->hop_count = 0;
-    out_frame->max_hops = s_config.max_hops;
+    out_frame->reserved0 = 0;
     out_frame->payload_len = payload_len;
     out_frame->issued_ms = ts;
     out_frame->expires_ms = ts + 10000;
@@ -221,6 +220,7 @@ static bool frame_basic_valid(const swarm_frame_t *frame, int len)
     }
 
     if (frame->version != SWARM_VERSION) return false;
+    if (frame->reserved0 != 0) return false;
     if (frame->payload_len > SWARM_AGENT_MAX_PAYLOAD) return false;
 
     int expected = (int)(sizeof(swarm_frame_t) - SWARM_AGENT_MAX_PAYLOAD + frame->payload_len);
@@ -350,7 +350,6 @@ esp_err_t swarm_agent_start(const swarm_agent_config_t *config)
         s_config = *config;
         if (s_config.udp_port == 0) s_config.udp_port = 4747;
         if (!s_config.broadcast_addr) s_config.broadcast_addr = "255.255.255.255";
-        if (s_config.max_hops == 0) s_config.max_hops = 3;
         if (s_config.hello_interval_ms == 0) s_config.hello_interval_ms = 5000;
         if (s_config.zone_state_interval_ms == 0) s_config.zone_state_interval_ms = 7000;
     }

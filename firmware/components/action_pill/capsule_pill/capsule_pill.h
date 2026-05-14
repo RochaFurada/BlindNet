@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define CAPSULE_PILL_VERSION 2
+#define CAPSULE_PILL_VERSION 3
 #define CAPSULE_PILL_NONCE_LEN 16
 #define CAPSULE_PILL_NETWORK_ID_LEN 16
 #define CAPSULE_PILL_ISSUER_KEY_ID_LEN 16
@@ -22,8 +22,8 @@ extern "C" {
  * Capsule Pill = capsula.
  *
  * A capsula nao e o comando e nao revela destino. Ela e o nucleo imutavel:
- * validade, limites de propagacao, classe generica, nonce, rede, hash do AS
- * cifrado e assinatura do app/autorizador.
+ * validade, classe generica, nonce, rede, hash do AS cifrado e assinatura
+ * do app/autorizador.
  */
 typedef enum {
     CAPSULE_PILL_ACTION_UNKNOWN = 0,
@@ -44,8 +44,8 @@ typedef enum {
 typedef struct {
     uint8_t version;
     uint8_t flags;
-    uint8_t max_hops;
     uint8_t action_class;
+    uint8_t reserved0;
     uint32_t issued_ms;
     uint32_t expires_ms;
     uint8_t network_id[CAPSULE_PILL_NETWORK_ID_LEN];
@@ -54,7 +54,7 @@ typedef struct {
     uint8_t issuer_key_id[CAPSULE_PILL_ISSUER_KEY_ID_LEN];
     uint8_t signature_alg;
     uint8_t signature_len;
-    uint8_t reserved0[2];
+    uint8_t reserved1[2];
     uint8_t signature[CAPSULE_PILL_SIGNATURE_MAX_LEN];
 } capsule_pill_t;
 
@@ -63,7 +63,6 @@ void capsule_pill_init(capsule_pill_t *capsule);
 esp_err_t capsule_pill_configure(
     capsule_pill_t *capsule,
     capsule_pill_action_class_t action_class,
-    uint8_t max_hops,
     uint32_t issued_ms,
     uint32_t expires_ms,
     const uint8_t network_id[CAPSULE_PILL_NETWORK_ID_LEN],

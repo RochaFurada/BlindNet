@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define ACTION_PILL_VERSION 2
+#define ACTION_PILL_VERSION 3
 #define ACTION_PILL_INNER_ID_LEN 32
 #define ACTION_PILL_PEER_TAG_LEN 16
 #define ACTION_PILL_TRANSIT_MAC_LEN 32
@@ -46,7 +46,6 @@ void action_pill_init(action_pill_t *pill);
 esp_err_t action_pill_set_encrypted(
     action_pill_t *pill,
     capsule_pill_action_class_t action_class,
-    uint8_t max_hops,
     uint32_t issued_ms,
     uint32_t expires_ms,
     const uint8_t network_id[CAPSULE_PILL_NETWORK_ID_LEN],

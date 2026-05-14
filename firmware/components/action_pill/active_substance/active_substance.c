@@ -57,13 +57,14 @@ esp_err_t active_substance_set_ciphertext(
     memcpy(substance->tag, tag, ACTIVE_SUBSTANCE_TAG_LEN);
     memcpy(substance->ciphertext, ciphertext, ciphertext_len);
 
-    return active_substance_validate(substance);
+    return active_substance_validate_envelope(substance);
 }
 
 /*
- * Valida as restricoes do composto ativo antes de assinar ou executar.
+ * Valida apenas o envelope cifrado do AS. Nao descriptografa, nao autentica
+ * a tag AEAD e nao interpreta o comando real.
  */
-esp_err_t active_substance_validate(const active_substance_t *substance)
+esp_err_t active_substance_validate_envelope(const active_substance_t *substance)
 {
     if (!substance) return ESP_ERR_INVALID_ARG;
     if (substance->version != ACTIVE_SUBSTANCE_VERSION) return ESP_ERR_INVALID_VERSION;
@@ -82,6 +83,11 @@ esp_err_t active_substance_validate(const active_substance_t *substance)
     return ESP_OK;
 }
 
+esp_err_t active_substance_validate(const active_substance_t *substance)
+{
+    return active_substance_validate_envelope(substance);
+}
+
 /*
  * Calcula o SHA-256 canonico do composto ativo cifrado.
  * Nao fazemos hash da struct inteira porque structs podem conter padding.
@@ -93,7 +99,7 @@ esp_err_t active_substance_hash(
 {
     if (!substance || !out_hash) return ESP_ERR_INVALID_ARG;
 
-    esp_err_t err = active_substance_validate(substance);
+    esp_err_t err = active_substance_validate_envelope(substance);
     if (err != ESP_OK) return err;
 
     const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);

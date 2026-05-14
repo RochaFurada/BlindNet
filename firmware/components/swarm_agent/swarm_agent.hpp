@@ -92,7 +92,7 @@ typedef struct __attribute__((packed)) {
     uint32_t origin_id;
     uint32_t target_id;
     uint8_t hop_count;
-    uint8_t max_hops;
+    uint8_t reserved0;
     uint16_t payload_len;
     uint32_t issued_ms;
     uint32_t expires_ms;
@@ -106,7 +106,6 @@ typedef struct {
     uint32_t zone_id;
     uint16_t udp_port;
     const char *broadcast_addr;
-    uint8_t max_hops;
     uint32_t hello_interval_ms;
     uint32_t zone_state_interval_ms;
     swarm_verify_mode_t verify_mode;

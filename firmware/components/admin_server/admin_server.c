@@ -8,6 +8,9 @@
 #include "esp_http_server.h"
 #include "esp_system.h"
 
+#include "mbedtls/md.h"
+#include "mbedtls/pk.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -18,7 +21,7 @@ static const char *TAG = "admin_server";
 static httpd_handle_t s_server = NULL;
 static bool s_running = false;
 
-#define ADMIN_POST_BUF_SIZE 512
+#define ADMIN_POST_BUF_SIZE 2048
 
 static const char HTML_PAGE[] =
 "<!doctype html>"
@@ -49,10 +52,20 @@ static const char HTML_PAGE[] =
 "<input name='ap_ssid' maxlength='31' value='ZoneGuard_Sala' required>"
 "<label>Senha do AP do ESP</label>"
 "<input name='ap_password' type='password' maxlength='63' value='zoneguard123' required>"
+"<label>Chave pública do usuário</label>"
+"<input id='pub_key_user' type='file' accept='.pem,.pub,.txt' required>"
+"<textarea id='issuer_public_key_pem' name='issuer_public_key_pem' hidden></textarea>"
 "<button type='submit'>Salvar e reiniciar</button>"
 "</form>"
 "<div class='hint'>Depois de salvar, este servidor de configuração não será iniciado no modo normal.</div>"
 "</div>"
+"<script>"
+"document.getElementById('pub_key_user').addEventListener('change',async function(ev){"
+"var file=ev.target.files[0];"
+"if(!file){return;}"
+"document.getElementById('issuer_public_key_pem').value=await file.text();"
+"});"
+"</script>"
 "</body>"
 "</html>";
 
@@ -79,16 +92,16 @@ static int hex_value(char c)
     return -1;
 }
 
-static void url_decode(char *dst, size_t dst_size, const char *src)
+static void url_decode_n(char *dst, size_t dst_size, const char *src, size_t src_len)
 {
     if (!dst || dst_size == 0) return;
 
     size_t di = 0;
 
-    for (size_t si = 0; src && src[si] && di + 1 < dst_size; ++si) {
+    for (size_t si = 0; src && si < src_len && di + 1 < dst_size; ++si) {
         if (src[si] == '+') {
             dst[di++] = ' ';
-        } else if (src[si] == '%' && src[si + 1] && src[si + 2]) {
+        } else if (src[si] == '%' && si + 2 < src_len) {
             int hi = hex_value(src[si + 1]);
             int lo = hex_value(src[si + 2]);
 
@@ -132,17 +145,7 @@ static bool form_get_value(
         if (name_len == key_len && strncmp(p, key, key_len) == 0) {
             size_t value_len = amp ? (size_t)(amp - (eq + 1)) : strlen(eq + 1);
 
-            char encoded[128];
-            size_t copy_len = value_len;
-
-            if (copy_len >= sizeof(encoded)) {
-                copy_len = sizeof(encoded) - 1;
-            }
-
-            memcpy(encoded, eq + 1, copy_len);
-            encoded[copy_len] = '\0';
-
-            url_decode(out, out_size, encoded);
+            url_decode_n(out, out_size, eq + 1, value_len);
             return true;
         }
 
@@ -150,6 +153,68 @@ static bool form_get_value(
     }
 
     return false;
+}
+
+static esp_err_t validate_issuer_public_key_pem(const char *pem)
+{
+    if (!pem || pem[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+
+    int rc = mbedtls_pk_parse_public_key(
+        &pk,
+        (const unsigned char *)pem,
+        strlen(pem) + 1
+    );
+
+    if (rc == 0 && !mbedtls_pk_can_do(&pk, MBEDTLS_PK_ECDSA)) {
+        rc = -1;
+    }
+
+    mbedtls_pk_free(&pk);
+    return rc == 0 ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+
+static esp_err_t compute_issuer_key_id(
+    const char *pem,
+    uint8_t out_key_id[CONFIG_STORE_KEY_ID_LEN]
+)
+{
+    if (!pem || !out_key_id) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (!info) {
+        return ESP_FAIL;
+    }
+
+    uint8_t digest[32];
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+
+    int rc = mbedtls_md_setup(&ctx, info, 0);
+    if (rc == 0) rc = mbedtls_md_starts(&ctx);
+    if (rc == 0) {
+        rc = mbedtls_md_update(
+            &ctx,
+            (const unsigned char *)pem,
+            strlen(pem)
+        );
+    }
+    if (rc == 0) rc = mbedtls_md_finish(&ctx, digest);
+
+    mbedtls_md_free(&ctx);
+
+    if (rc != 0) {
+        return ESP_FAIL;
+    }
+
+    memcpy(out_key_id, digest, CONFIG_STORE_KEY_ID_LEN);
+    return ESP_OK;
 }
 
 static esp_err_t root_get_handler(httpd_req_t *req)
@@ -179,6 +244,7 @@ static void restart_later_task(void *arg)
 static esp_err_t save_post_handler(httpd_req_t *req)
 {
     char body[ADMIN_POST_BUF_SIZE];
+    char issuer_public_key_pem[512];
 
     int total = req->content_len;
 
@@ -210,7 +276,13 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     if (!form_get_value(body, "sta_ssid", sta_ssid, sizeof(sta_ssid)) ||
         !form_get_value(body, "sta_password", sta_password, sizeof(sta_password)) ||
         !form_get_value(body, "ap_ssid", ap_ssid, sizeof(ap_ssid)) ||
-        !form_get_value(body, "ap_password", ap_password, sizeof(ap_password))) {
+        !form_get_value(body, "ap_password", ap_password, sizeof(ap_password)) ||
+        !form_get_value(
+            body,
+            "issuer_public_key_pem",
+            issuer_public_key_pem,
+            sizeof(issuer_public_key_pem)
+        )) {
 
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing fields");
         return ESP_FAIL;
@@ -234,6 +306,11 @@ static esp_err_t save_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    if (validate_issuer_public_key_pem(issuer_public_key_pem) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid issuer public key");
+        return ESP_FAIL;
+    }
+
     zoneguard_config_t cfg;
     config_store_set_defaults(&cfg);
 
@@ -241,6 +318,20 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     safe_copy(cfg.sta_password, sizeof(cfg.sta_password), sta_password);
     safe_copy(cfg.ap_ssid, sizeof(cfg.ap_ssid), ap_ssid);
     safe_copy(cfg.ap_password, sizeof(cfg.ap_password), ap_password);
+    safe_copy(
+        cfg.issuer_public_key_pem,
+        sizeof(cfg.issuer_public_key_pem),
+        issuer_public_key_pem
+    );
+
+    esp_err_t key_id_err = compute_issuer_key_id(
+        issuer_public_key_pem,
+        cfg.issuer_key_id
+    );
+    if (key_id_err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "key id failed");
+        return ESP_FAIL;
+    }
 
     cfg.ap_channel = 6;
     cfg.ap_max_connections = 4;
@@ -296,7 +387,7 @@ esp_err_t admin_server_start(const admin_server_config_t *config)
     http_config.server_port = 80;
     http_config.max_uri_handlers = 4;
     http_config.max_open_sockets = 2;
-    http_config.stack_size = 4096;
+    http_config.stack_size = 8192;
     http_config.lru_purge_enable = true;
 
     esp_err_t err = httpd_start(&s_server, &http_config);

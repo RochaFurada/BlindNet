@@ -717,7 +717,6 @@ static void enter_normal_mode(const zoneguard_config_t *cfg)
     swarm_config.udp_port = cfg->swarm_port ? cfg->swarm_port : 4747;
     swarm_config.broadcast_addr =
         cfg->swarm_broadcast[0] ? cfg->swarm_broadcast : "255.255.255.255";
-    swarm_config.max_hops = 3;
     swarm_config.hello_interval_ms = 5000;
     swarm_config.zone_state_interval_ms = 7000;
     swarm_config.verify_mode = SWARM_VERIFY_HMAC_SHA256;
