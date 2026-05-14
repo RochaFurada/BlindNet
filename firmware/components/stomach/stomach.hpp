@@ -41,6 +41,7 @@ private:
     std::size_t next_ = 0;
     std::size_t count_ = 0;
 };
+
 // Segunda camada de digestão do Action Pill. Valida o CP imutável e a assinatura, e faz checks básicos de AS cifrado.
 class StructValidator final {
 public:
@@ -65,7 +66,6 @@ class CapsuleDigester final {
     );
 
 };
-
 
 
 class Stomach final {

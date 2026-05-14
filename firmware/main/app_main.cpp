@@ -26,6 +26,7 @@ extern "C" {
 #include "quarantine_manager.h"
 
 #include "device_registry.h"
+#include "MQTT_broker.h"
 #include "dns_filter.h"
 #include "zone_firewall.h"
 }
@@ -45,6 +46,41 @@ static void add_initial_policies();
 static void add_initial_rate_limits();
 static void add_initial_dns_rules();
 static void test_zone_firewall_fake_flow();
+
+static void on_mqtt_message(const mqtt_broker_message_t *message, void *ctx)
+{
+    (void)ctx;
+
+    if (!message) {
+        return;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "MQTT RX client=%s topic=%s bytes=%u",
+        message->client_id ? message->client_id : "",
+        message->topic ? message->topic : "",
+        (unsigned)message->payload_len
+    );
+}
+
+static bool on_mqtt_connect(const mqtt_broker_connect_t *event, void *ctx)
+{
+    (void)ctx;
+
+    if (!event) {
+        return false;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "MQTT CONNECT client=%s username=%s",
+        event->client_id ? event->client_id : "",
+        event->username ? event->username : ""
+    );
+
+    return true;
+}
 
 // ============================================================
 // Utilidades
@@ -705,6 +741,28 @@ static void enter_normal_mode(const zoneguard_config_t *cfg)
          *
          * Para debug, eu prefiro continuar.
          */
+    }
+
+    // --------------------------------------------------------
+    // MQTT Broker local
+    // --------------------------------------------------------
+
+    mqtt_broker_config_t mqtt_config = {};
+    mqtt_broker_config_defaults(&mqtt_config);
+    mqtt_config.zone_id = cfg->zone_id;
+    mqtt_config.listen_port = MQTT_BROKER_DEFAULT_PORT;
+    mqtt_config.connect_cb = on_mqtt_connect;
+    mqtt_config.message_cb = on_mqtt_message;
+
+    esp_netif_ip_info_t ap_ip_info = {};
+    if (esp_netif_get_ip_info(wifi_manager_get_ap_netif(), &ap_ip_info) == ESP_OK) {
+        mqtt_config.bind_ip = ap_ip_info.ip.addr;
+    }
+
+    esp_err_t mqtt_ret = mqtt_broker_start(&mqtt_config);
+
+    if (mqtt_ret != ESP_OK) {
+        ESP_LOGW(TAG, "MQTT broker não iniciou: %s", esp_err_to_name(mqtt_ret));
     }
 
     // --------------------------------------------------------
