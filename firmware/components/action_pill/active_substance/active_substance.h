@@ -10,60 +10,55 @@
 extern "C" {
 #endif
 
-#ifndef ACTIVE_SUBSTANCE_TOPIC_MAX_LEN
-#define ACTIVE_SUBSTANCE_TOPIC_MAX_LEN 128
+#ifndef ACTIVE_SUBSTANCE_CIPHERTEXT_MAX_LEN
+#define ACTIVE_SUBSTANCE_CIPHERTEXT_MAX_LEN 256
 #endif
 
-#ifndef ACTIVE_SUBSTANCE_PAYLOAD_MAX_LEN
-#define ACTIVE_SUBSTANCE_PAYLOAD_MAX_LEN 256
-#endif
-
-#define ACTIVE_SUBSTANCE_VERSION 1
+#define ACTIVE_SUBSTANCE_VERSION 2
 #define ACTIVE_SUBSTANCE_HASH_LEN 32
+#define ACTIVE_SUBSTANCE_NONCE_LEN 12
+#define ACTIVE_SUBSTANCE_TAG_LEN 16
 
 /*
  * Active Substance = composto ativo.
  *
- * Esta é a parte que efetivamente vira comando para o dispositivo IoT.
- * No MVP, ela descreve apenas um MQTT PUBLISH: topic + payload.
+ * Esta e a parte que efetivamente vira comando para o dispositivo IoT,
+ * mas na BlindNet ela viaja opaca. O app do usuario cifra o conteudo
+ * antes de criar o Action Pill; o Guardian so tenta abrir localmente
+ * quando alguma chave de dispositivo permitir.
  */
 typedef enum {
-    ACTIVE_SUBSTANCE_TRANSPORT_UNKNOWN = 0,
-    ACTIVE_SUBSTANCE_TRANSPORT_MQTT_PUBLISH = 1
-} active_substance_transport_t;
+    ACTIVE_SUBSTANCE_CIPHER_UNKNOWN = 0,
+    ACTIVE_SUBSTANCE_CIPHER_AES_128_GCM = 1,
+    ACTIVE_SUBSTANCE_CIPHER_AES_256_GCM = 2,
+    ACTIVE_SUBSTANCE_CIPHER_CHACHA20_POLY1305 = 3
+} active_substance_cipher_t;
 
 /*
- * Comando MQTT bruto que o Guardian poderá publicar se a cápsula permitir.
- * Para manter o broker mínimo previsível no MVP, use QoS 0 e retain=false.
- */
-typedef struct {
-    char topic[ACTIVE_SUBSTANCE_TOPIC_MAX_LEN];
-    uint16_t topic_len;
-    uint16_t payload_len;
-    uint8_t payload[ACTIVE_SUBSTANCE_PAYLOAD_MAX_LEN];
-    uint8_t qos;
-    bool retain;
-} active_substance_mqtt_t;
-
-/*
- * Estrutura principal do composto ativo.
- * Novos transportes podem entrar aqui depois sem mudar o conceito da cápsula.
+ * Blob cifrado AEAD.
+ *
+ * O CP deve ser usado como AAD pelo app ao cifrar. Este modulo nao
+ * descriptografa; ele apenas preserva bytes canonicos para hash, cache e
+ * verificacao de vinculo CP -> AS.
  */
 typedef struct {
     uint8_t version;
-    active_substance_transport_t transport;
-    active_substance_mqtt_t mqtt;
+    uint8_t cipher;
+    uint16_t ciphertext_len;
+    uint8_t nonce[ACTIVE_SUBSTANCE_NONCE_LEN];
+    uint8_t tag[ACTIVE_SUBSTANCE_TAG_LEN];
+    uint8_t ciphertext[ACTIVE_SUBSTANCE_CIPHERTEXT_MAX_LEN];
 } active_substance_t;
 
 void active_substance_init(active_substance_t *substance);
 
-esp_err_t active_substance_set_mqtt(
+esp_err_t active_substance_set_ciphertext(
     active_substance_t *substance,
-    const char *topic,
-    const void *payload,
-    size_t payload_len,
-    uint8_t qos,
-    bool retain
+    active_substance_cipher_t cipher,
+    const uint8_t nonce[ACTIVE_SUBSTANCE_NONCE_LEN],
+    const uint8_t tag[ACTIVE_SUBSTANCE_TAG_LEN],
+    const void *ciphertext,
+    size_t ciphertext_len
 );
 
 esp_err_t active_substance_validate(const active_substance_t *substance);
@@ -73,7 +68,7 @@ esp_err_t active_substance_hash(
     uint8_t out_hash[ACTIVE_SUBSTANCE_HASH_LEN]
 );
 
-const char *active_substance_transport_to_string(active_substance_transport_t transport);
+const char *active_substance_cipher_to_string(active_substance_cipher_t cipher);
 
 #ifdef __cplusplus
 }
