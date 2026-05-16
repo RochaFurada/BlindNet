@@ -74,6 +74,8 @@ esp_err_t action_pill_precheck_for_relay(
 esp_err_t action_pill_validate_authorized(
     const action_pill_t *pill,
     uint32_t now_ms,
+    const uint8_t expected_network_id[CAPSULE_PILL_NETWORK_ID_LEN],
+    const uint8_t expected_issuer_key_id[CAPSULE_PILL_ISSUER_KEY_ID_LEN],
     const uint8_t *issuer_public_key,
     size_t issuer_public_key_len
 );
@@ -81,6 +83,16 @@ esp_err_t action_pill_validate_authorized(
 esp_err_t action_pill_refresh_active_hash(action_pill_t *pill);
 
 bool action_pill_capsule_matches_active(const action_pill_t *pill);
+
+bool action_pill_network_id_matches(
+    const action_pill_t *pill,
+    const uint8_t expected_network_id[CAPSULE_PILL_NETWORK_ID_LEN]
+);
+
+bool action_pill_issuer_key_matches(
+    const action_pill_t *pill,
+    const uint8_t expected_issuer_key_id[CAPSULE_PILL_ISSUER_KEY_ID_LEN]
+);
 
 bool action_pill_verify_capsule_signature(
     const action_pill_t *pill,

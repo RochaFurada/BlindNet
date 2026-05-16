@@ -5,6 +5,8 @@
 
 #include "esp_err.h"
 #include "action_pill.hpp"
+#include "active_enzyme.h"
+#include "ribosome_table.h"
 
 #ifndef STOMACH_CP_CACHE_SIZE
 #define STOMACH_CP_CACHE_SIZE 16
@@ -16,6 +18,12 @@ struct StomachSeenResult {
     esp_err_t status;
     bool seen;
     uint8_t digest[ACTION_PILL_INNER_ID_LEN];
+};
+
+struct DigestedActiveSubstance {
+    uint8_t plaintext[ACTIVE_ENZYME_PLAINTEXT_MAX_LEN];
+    std::size_t plaintext_len;
+    ribosome_table_entry_t device;
 };
 
 // Primeira camada de digestão do Action Pill. Foca em validar o CP imutável e
@@ -53,18 +61,22 @@ class CapsuleVerifier final {
 public:
     static bool verify(
         const action_pill_t &pill,
+        const uint8_t expected_network_id[CAPSULE_PILL_NETWORK_ID_LEN],
+        const uint8_t expected_issuer_key_id[CAPSULE_PILL_ISSUER_KEY_ID_LEN],
         const uint8_t *issuer_public_key,
         std::size_t issuer_public_key_len
     );
 };
 
 class CapsuleDigester final {
-    public:
+public:
     static esp_err_t digest_active_substance(
         const action_pill_t &pill,
-        uint8_t out_id[ACTION_PILL_INNER_ID_LEN]
+        const ribosome_table_t &devices,
+        const uint8_t *aad,
+        std::size_t aad_len,
+        DigestedActiveSubstance *out_result
     );
-
 };
 
 
@@ -83,6 +95,8 @@ public:
     esp_err_t validate_authorized(
         const action_pill_t &pill,
         uint32_t now_ms,
+        const uint8_t expected_network_id[CAPSULE_PILL_NETWORK_ID_LEN],
+        const uint8_t expected_issuer_key_id[CAPSULE_PILL_ISSUER_KEY_ID_LEN],
         const uint8_t *issuer_public_key,
         std::size_t issuer_public_key_len
     ) const;

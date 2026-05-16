@@ -126,12 +126,22 @@ esp_err_t action_pill_precheck_for_relay(
 esp_err_t action_pill_validate_authorized(
     const action_pill_t *pill,
     uint32_t now_ms,
+    const uint8_t expected_network_id[CAPSULE_PILL_NETWORK_ID_LEN],
+    const uint8_t expected_issuer_key_id[CAPSULE_PILL_ISSUER_KEY_ID_LEN],
     const uint8_t *issuer_public_key,
     size_t issuer_public_key_len
 )
 {
     esp_err_t err = action_pill_precheck_for_relay(pill, now_ms);
     if (err != ESP_OK) return err;
+
+    if (!action_pill_network_id_matches(pill, expected_network_id)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!action_pill_issuer_key_matches(pill, expected_issuer_key_id)) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     if (!action_pill_capsule_matches_active(pill)) {
         return ESP_ERR_INVALID_CRC;
@@ -162,6 +172,34 @@ bool action_pill_capsule_matches_active(const action_pill_t *pill)
 {
     if (!pill) return false;
     return capsule_pill_matches_active(&pill->capsule, &pill->active);
+}
+
+bool action_pill_network_id_matches(
+    const action_pill_t *pill,
+    const uint8_t expected_network_id[CAPSULE_PILL_NETWORK_ID_LEN]
+)
+{
+    if (!pill || !expected_network_id) return false;
+
+    return capsule_pill_constant_time_equal(
+        pill->capsule.network_id,
+        expected_network_id,
+        CAPSULE_PILL_NETWORK_ID_LEN
+    );
+}
+
+bool action_pill_issuer_key_matches(
+    const action_pill_t *pill,
+    const uint8_t expected_issuer_key_id[CAPSULE_PILL_ISSUER_KEY_ID_LEN]
+)
+{
+    if (!pill || !expected_issuer_key_id) return false;
+
+    return capsule_pill_constant_time_equal(
+        pill->capsule.issuer_key_id,
+        expected_issuer_key_id,
+        CAPSULE_PILL_ISSUER_KEY_ID_LEN
+    );
 }
 
 bool action_pill_verify_capsule_signature(

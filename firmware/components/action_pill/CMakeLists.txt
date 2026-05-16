@@ -6,6 +6,7 @@ idf_component_register(
         "action_pill.cpp"
         "capsule_pill/capsule_pill.c"
         "active_substance/active_substance.c"
+        "active_substance/active_enzyme.c"
     INCLUDE_DIRS
         "."
         "capsule_pill"
