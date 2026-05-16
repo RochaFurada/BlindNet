@@ -1,7 +1,7 @@
 services:
   blindnet-idf-rust:
     image: espressif/idf-rust:esp32_latest
-    container_name: blindnet-idf-rust
+    container_name: blindnet
     working_dir: /workspace/BlindNet
     stdin_open: true
     tty: true
