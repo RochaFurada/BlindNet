@@ -1,4 +1,4 @@
-#include "swarm_agent.hpp"
+#include "swarm_agent.h"
 
 #include <string.h>
 #include <errno.h>
@@ -23,22 +23,22 @@ static const char *TAG = "swarm_agent";
 #define SWARM_TASK_PRIO   5
 
 static swarm_agent_config_t s_config;
-static TaskHandle_t s_rx_task = nullptr;
-static TaskHandle_t s_periodic_task = nullptr;
+static TaskHandle_t s_rx_task = NULL;
+static TaskHandle_t s_periodic_task = NULL;
 static int s_sock = -1;
 static volatile bool s_running = false;
 static volatile bool s_stop_requested = false;
-static swarm_agent_frame_cb_t s_frame_cb = nullptr;
-static void *s_frame_cb_ctx = nullptr;
+static swarm_agent_frame_cb_t s_frame_cb = NULL;
+static void *s_frame_cb_ctx = NULL;
 static swarm_agent_stats_t s_stats;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static uint32_t now_ms()
+static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
-static uint32_t next_message_id()
+static uint32_t next_message_id(void)
 {
     static uint32_t s_counter = 1;
     return __atomic_fetch_add(&s_counter, 1, __ATOMIC_RELAXED);
@@ -76,10 +76,10 @@ static void load_default_config(swarm_agent_config_t *config)
     config->verify_mode = SWARM_VERIFY_DISABLED;
 }
 
-static bool hmac_enabled()
+static bool hmac_enabled(void)
 {
     return s_config.verify_mode == SWARM_VERIFY_HMAC_SHA256 &&
-           s_config.shared_key != nullptr &&
+           s_config.shared_key != NULL &&
            s_config.shared_key_len > 0;
 }
 
@@ -128,7 +128,7 @@ static esp_err_t sign_frame(swarm_frame_t *frame)
     const size_t len_to_sign =
         sizeof(swarm_frame_t) - SWARM_AGENT_MAX_PAYLOAD + frame->payload_len;
 
-    return compute_hmac_sha256(reinterpret_cast<const uint8_t *>(frame), len_to_sign, frame->hmac);
+    return compute_hmac_sha256((const uint8_t *)frame, len_to_sign, frame->hmac);
 }
 
 static bool verify_frame_hmac(const swarm_frame_t *frame)
@@ -148,7 +148,7 @@ static bool verify_frame_hmac(const swarm_frame_t *frame)
     const size_t len_to_sign =
         sizeof(swarm_frame_t) - SWARM_AGENT_MAX_PAYLOAD + copy.payload_len;
 
-    esp_err_t err = compute_hmac_sha256(reinterpret_cast<const uint8_t *>(&copy),
+    esp_err_t err = compute_hmac_sha256((const uint8_t *)&copy,
                                         len_to_sign, expected);
     if (err != ESP_OK) return false;
 
@@ -198,7 +198,7 @@ static esp_err_t send_frame(const swarm_frame_t *frame)
     const size_t frame_len = sizeof(swarm_frame_t) - SWARM_AGENT_MAX_PAYLOAD + frame->payload_len;
 
     int sent = sendto(s_sock, frame, frame_len, 0,
-                      reinterpret_cast<struct sockaddr *>(&dest), sizeof(dest));
+                      (struct sockaddr *)&dest, sizeof(dest));
 
     if (sent < 0) {
         stats_inc(&s_stats.tx_errors);
@@ -262,7 +262,7 @@ static void rx_task(void *arg)
         socklen_t source_len = sizeof(source);
 
         int len = recvfrom(s_sock, &frame, sizeof(frame), 0,
-                           reinterpret_cast<struct sockaddr *>(&source), &source_len);
+                           (struct sockaddr *)&source, &source_len);
 
         if (len < 0) {
             if (!s_stop_requested) stats_inc(&s_stats.rx_errors);
@@ -283,8 +283,8 @@ static void rx_task(void *arg)
         if (s_frame_cb) s_frame_cb(&frame, s_frame_cb_ctx);
     }
 
-    s_rx_task = nullptr;
-    vTaskDelete(nullptr);
+    s_rx_task = NULL;
+    vTaskDelete(NULL);
 }
 
 static void periodic_task(void *arg)
@@ -310,11 +310,11 @@ static void periodic_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(250));
     }
 
-    s_periodic_task = nullptr;
-    vTaskDelete(nullptr);
+    s_periodic_task = NULL;
+    vTaskDelete(NULL);
 }
 
-static esp_err_t open_udp_socket()
+static esp_err_t open_udp_socket(void)
 {
     s_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (s_sock < 0) return ESP_FAIL;
@@ -332,7 +332,7 @@ static esp_err_t open_udp_socket()
     listen_addr.sin_port = htons(s_config.udp_port);
     listen_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    if (bind(s_sock, reinterpret_cast<struct sockaddr *>(&listen_addr), sizeof(listen_addr)) < 0) {
+    if (bind(s_sock, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0) {
         close(s_sock);
         s_sock = -1;
         return ESP_FAIL;
@@ -360,14 +360,14 @@ esp_err_t swarm_agent_start(const swarm_agent_config_t *config)
     esp_err_t err = open_udp_socket();
     if (err != ESP_OK) return err;
 
-    if (xTaskCreate(rx_task, "swarm_rx", SWARM_RX_STACK, nullptr,
+    if (xTaskCreate(rx_task, "swarm_rx", SWARM_RX_STACK, NULL,
                     SWARM_TASK_PRIO, &s_rx_task) != pdPASS) {
         close(s_sock);
         s_sock = -1;
         return ESP_ERR_NO_MEM;
     }
 
-    if (xTaskCreate(periodic_task, "swarm_periodic", SWARM_TX_STACK, nullptr,
+    if (xTaskCreate(periodic_task, "swarm_periodic", SWARM_TX_STACK, NULL,
                     SWARM_TASK_PRIO, &s_periodic_task) != pdPASS) {
         s_stop_requested = true;
         close(s_sock);

@@ -7,6 +7,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_random.h"
+#include "mbedtls/platform_util.h"
 
 static const char *TAG = "config_store";
 static const char *NVS_NS = "zoneguard";
@@ -29,7 +30,7 @@ void config_store_set_defaults(zoneguard_config_t *config)
 {
     if (!config) return;
 
-    memset(config, 0, sizeof(*config));
+    mbedtls_platform_zeroize(config, sizeof(*config));
 
     config->magic = ZG_CONFIG_MAGIC;
     config->version = ZG_CONFIG_VERSION;

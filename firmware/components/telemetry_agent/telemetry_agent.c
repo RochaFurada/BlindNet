@@ -1,4 +1,4 @@
-#include "telemetry_agent.hpp"
+#include "telemetry_agent.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -15,16 +15,14 @@
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 
-extern "C" {
 #include "wifi_manager.h"
 #include "zone_gateway.h"
 #include "flow_table.h"
 #include "policy_engine.h"
 #include "rate_limiter.h"
 #include "quarantine_manager.h"
-}
 
-#include "swarm_agent.hpp"
+#include "swarm_agent.h"
 
 static const char *TAG = "telemetry_agent";
 
@@ -33,14 +31,14 @@ static const char *TAG = "telemetry_agent";
 #define TELEMETRY_BUFFER_SIZE      1400
 
 static telemetry_agent_config_t s_config;
-static TaskHandle_t s_task = nullptr;
+static TaskHandle_t s_task = NULL;
 static volatile bool s_running = false;
 static volatile bool s_stop_requested = false;
 static int s_udp_sock = -1;
 static telemetry_agent_stats_t s_stats;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static uint32_t now_ms()
+static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
@@ -59,7 +57,7 @@ static void load_default_config(telemetry_agent_config_t *config)
     config->guardian_id = 0xAABB0001;
     config->interval_ms = 10000;
     config->outputs = TELEMETRY_OUTPUT_SERIAL;
-    config->udp_host = nullptr;
+    config->udp_host = NULL;
     config->udp_port = 5757;
     config->send_on_start = true;
 }
@@ -86,11 +84,11 @@ static const char *gateway_state_to_string(zone_gateway_state_t state)
     }
 }
 
-static esp_err_t open_udp_if_needed()
+static esp_err_t open_udp_if_needed(void)
 {
     if ((s_config.outputs & TELEMETRY_OUTPUT_UDP) == 0) return ESP_OK;
 
-    if (s_config.udp_host == nullptr || s_config.udp_port == 0) return ESP_ERR_INVALID_ARG;
+    if (s_config.udp_host == NULL || s_config.udp_port == 0) return ESP_ERR_INVALID_ARG;
     if (s_udp_sock >= 0) return ESP_OK;
 
     s_udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
@@ -99,7 +97,7 @@ static esp_err_t open_udp_if_needed()
     return ESP_OK;
 }
 
-static void close_udp()
+static void close_udp(void)
 {
     if (s_udp_sock >= 0) {
         close(s_udp_sock);
@@ -248,7 +246,7 @@ static esp_err_t send_udp(const char *snapshot)
     dest.sin_addr.s_addr = inet_addr(s_config.udp_host);
 
     int sent = sendto(s_udp_sock, snapshot, strlen(snapshot), 0,
-                      reinterpret_cast<struct sockaddr *>(&dest), sizeof(dest));
+                      (struct sockaddr *)&dest, sizeof(dest));
 
     if (sent < 0) {
         stats_inc(&s_stats.udp_errors);
@@ -291,8 +289,8 @@ static void telemetry_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(interval));
     }
 
-    s_task = nullptr;
-    vTaskDelete(nullptr);
+    s_task = NULL;
+    vTaskDelete(NULL);
 }
 
 esp_err_t telemetry_agent_start(const telemetry_agent_config_t *config)
@@ -312,7 +310,7 @@ esp_err_t telemetry_agent_start(const telemetry_agent_config_t *config)
 
     s_stop_requested = false;
 
-    if (xTaskCreate(telemetry_task, "telemetry_agent", TELEMETRY_TASK_STACK_SIZE, nullptr,
+    if (xTaskCreate(telemetry_task, "telemetry_agent", TELEMETRY_TASK_STACK_SIZE, NULL,
                     TELEMETRY_TASK_PRIORITY, &s_task) != pdPASS) {
         close_udp();
         return ESP_ERR_NO_MEM;

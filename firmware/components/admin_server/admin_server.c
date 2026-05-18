@@ -10,6 +10,7 @@
 
 #include "mbedtls/md.h"
 #include "mbedtls/pk.h"
+#include "mbedtls/platform_util.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -192,7 +193,7 @@ static esp_err_t compute_issuer_key_id(
         return ESP_FAIL;
     }
 
-    uint8_t digest[32];
+    uint8_t digest[32] = {0};
     mbedtls_md_context_t ctx;
     mbedtls_md_init(&ctx);
 
@@ -209,12 +210,12 @@ static esp_err_t compute_issuer_key_id(
 
     mbedtls_md_free(&ctx);
 
-    if (rc != 0) {
-        return ESP_FAIL;
+    if (rc == 0) {
+        memcpy(out_key_id, digest, CONFIG_STORE_KEY_ID_LEN);
     }
 
-    memcpy(out_key_id, digest, CONFIG_STORE_KEY_ID_LEN);
-    return ESP_OK;
+    mbedtls_platform_zeroize(digest, sizeof(digest));
+    return rc == 0 ? ESP_OK : ESP_FAIL;
 }
 
 static esp_err_t root_get_handler(httpd_req_t *req)
@@ -243,14 +244,22 @@ static void restart_later_task(void *arg)
 
 static esp_err_t save_post_handler(httpd_req_t *req)
 {
-    char body[ADMIN_POST_BUF_SIZE];
-    char issuer_public_key_pem[512];
+    char body[ADMIN_POST_BUF_SIZE] = {0};
+    char issuer_public_key_pem[512] = {0};
+    char sta_ssid[32] = {0};
+    char sta_password[64] = {0};
+    char ap_ssid[32] = {0};
+    char ap_password[64] = {0};
+    zoneguard_config_t cfg;
+    mbedtls_platform_zeroize(&cfg, sizeof(cfg));
+
+    esp_err_t result = ESP_FAIL;
 
     int total = req->content_len;
 
     if (total <= 0 || total >= ADMIN_POST_BUF_SIZE) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body");
-        return ESP_FAIL;
+        goto cleanup;
     }
 
     int received = 0;
@@ -260,18 +269,13 @@ static esp_err_t save_post_handler(httpd_req_t *req)
 
         if (ret <= 0) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
-            return ESP_FAIL;
+            goto cleanup;
         }
 
         received += ret;
     }
 
     body[received] = '\0';
-
-    char sta_ssid[32];
-    char sta_password[64];
-    char ap_ssid[32];
-    char ap_password[64];
 
     if (!form_get_value(body, "sta_ssid", sta_ssid, sizeof(sta_ssid)) ||
         !form_get_value(body, "sta_password", sta_password, sizeof(sta_password)) ||
@@ -285,17 +289,17 @@ static esp_err_t save_post_handler(httpd_req_t *req)
         )) {
 
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing fields");
-        return ESP_FAIL;
+        goto cleanup;
     }
 
     if (strlen(sta_ssid) == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "sta_ssid empty");
-        return ESP_FAIL;
+        goto cleanup;
     }
 
     if (strlen(ap_ssid) == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ap_ssid empty");
-        return ESP_FAIL;
+        goto cleanup;
     }
 
     /*
@@ -303,15 +307,14 @@ static esp_err_t save_post_handler(httpd_req_t *req)
      */
     if (strlen(ap_password) < 8) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ap_password too short");
-        return ESP_FAIL;
+        goto cleanup;
     }
 
     if (validate_issuer_public_key_pem(issuer_public_key_pem) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid issuer public key");
-        return ESP_FAIL;
+        goto cleanup;
     }
 
-    zoneguard_config_t cfg;
     config_store_set_defaults(&cfg);
 
     safe_copy(cfg.sta_ssid, sizeof(cfg.sta_ssid), sta_ssid);
@@ -330,7 +333,7 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     );
     if (key_id_err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "key id failed");
-        return ESP_FAIL;
+        goto cleanup;
     }
 
     cfg.ap_channel = 6;
@@ -341,7 +344,7 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "falha ao salvar config: %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save failed");
-        return ESP_FAIL;
+        goto cleanup;
     }
 
     ESP_LOGI(TAG, "config salva. Reiniciando para modo normal.");
@@ -368,7 +371,17 @@ static esp_err_t save_post_handler(httpd_req_t *req)
         NULL
     );
 
-    return ESP_OK;
+    result = ESP_OK;
+
+cleanup:
+    mbedtls_platform_zeroize(body, sizeof(body));
+    mbedtls_platform_zeroize(issuer_public_key_pem, sizeof(issuer_public_key_pem));
+    mbedtls_platform_zeroize(sta_ssid, sizeof(sta_ssid));
+    mbedtls_platform_zeroize(sta_password, sizeof(sta_password));
+    mbedtls_platform_zeroize(ap_ssid, sizeof(ap_ssid));
+    mbedtls_platform_zeroize(ap_password, sizeof(ap_password));
+    mbedtls_platform_zeroize(&cfg, sizeof(cfg));
+    return result;
 }
 
 esp_err_t admin_server_start(const admin_server_config_t *config)

@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "mbedtls/md.h"
+#include "mbedtls/platform_util.h"
 
 static void update_u8(mbedtls_md_context_t *ctx, uint8_t value)
 {
@@ -25,7 +26,7 @@ void active_substance_init(active_substance_t *substance)
 {
     if (!substance) return;
 
-    memset(substance, 0, sizeof(*substance));
+    mbedtls_platform_zeroize(substance, sizeof(*substance));
     substance->version = ACTIVE_SUBSTANCE_VERSION;
     substance->cipher = ACTIVE_SUBSTANCE_CIPHER_UNKNOWN;
 }

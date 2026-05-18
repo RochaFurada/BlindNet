@@ -1,0 +1,203 @@
+flowchart TD
+    %% BlindNet Cortex - fluxo dos metodos principais em Rust
+    %% Objetivo: ajudar a decidir o que ja existe, o que chama C via platform, e o que ainda falta amarrar.
+
+    classDef ready fill:#e8f5e9,stroke:#2e7d32,color:#111;
+    classDef platform fill:#e3f2fd,stroke:#1565c0,color:#111;
+    classDef logic fill:#fffde7,stroke:#f9a825,color:#111;
+    classDef decision fill:#f3e5f5,stroke:#6a1b9a,color:#111;
+    classDef todo fill:#ffebee,stroke:#c62828,color:#111;
+
+    subgraph Boot["Boot / app_main"]
+        AppMainC["app_main.c<br/>ESP_ERROR_CHECK(blindnet_boot())"]
+        BootRust["boot::blindnet_boot()"]
+        RunCode["logic::app_main::run_code()"]
+        Run["logic::app_main::run()"]
+        EventInit["event_bus::init()<br/>event_bus::subscribe(on_event)"]
+        ConfigInit["config::init()"]
+        LoadConfig{"config::load(cfg)"}
+        SetupMode["enter_setup_mode()<br/>setup_ap::start()<br/>admin_server::start()"]
+        NormalMode["enter_normal_mode(cfg)"]
+
+        AppMainC --> BootRust --> RunCode --> Run
+        Run --> EventInit --> ConfigInit --> LoadConfig
+        LoadConfig -- "erro / sem NVS" --> SetupMode
+        LoadConfig -- "ok" --> NormalMode
+    end
+
+    subgraph Normal["Modo normal / servicos locais"]
+        RegistryInit["device_registry::init(zone_id)"]
+        WifiStart["wifi_manager::start(wifi_config)"]
+        FlowInit["flow_table::init()"]
+        PolicyInit["policy_engine::init()<br/>add_initial_policies()"]
+        RateInit["rate_limiter::init()<br/>add_initial_rate_limits()"]
+        QuarantineInit["quarantine_manager::init()"]
+        FirewallInit["zone_firewall::init(fw_config)"]
+        GatewayStart["zone_gateway::start_and_wait()"]
+        DnsStart["dns_filter::init()<br/>add_initial_dns_rules()<br/>dns_filter::start()"]
+        MqttStart["mqtt_broker::config_defaults()<br/>mqtt_broker::start()"]
+        SwarmStart["swarm_agent::set_frame_callback()<br/>swarm_agent::start()"]
+        TelemetryStart["telemetry_agent::start()"]
+        FakeFlow["test_zone_firewall_fake_flow()"]
+
+        NormalMode --> RegistryInit --> WifiStart --> FlowInit --> PolicyInit --> RateInit
+        RateInit --> QuarantineInit --> FirewallInit --> GatewayStart --> DnsStart
+        DnsStart --> MqttStart --> SwarmStart --> TelemetryStart --> FakeFlow
+    end
+
+    subgraph PillBuild["Montagem da ActionPill"]
+        CapsuleReady["CapsulePillRaw pronta<br/>metadata, active_hash, assinatura"]
+        ActiveReady["ActiveSubstanceRaw pronta<br/>cipher, nonce, tag, ciphertext"]
+        SetReady["action_pill::set_ready(capsule, active)"]
+        ValidateActive["active_substance::validate_envelope(active)"]
+        MatchActive{"capsule_pill::matches_active(capsule, active)"}
+        ActionReady["ActionPill<br/>capsule + active"]
+        RejectCrc["Err(ESP_ERR_INVALID_CRC)"]
+
+        CapsuleReady --> SetReady
+        ActiveReady --> SetReady
+        SetReady --> ValidateActive --> MatchActive
+        MatchActive -- "nao" --> RejectCrc
+        MatchActive -- "sim" --> ActionReady
+    end
+
+    subgraph Ingress["Entrada ainda a amarrar"]
+        TransportTodo["TODO<br/>definir receptor real<br/>BLE / MQTT / outro transporte"]
+        DecodeTodo["TODO<br/>parser/decoder para obter<br/>CapsulePillRaw + ActiveSubstanceRaw"]
+
+        TransportTodo --> DecodeTodo --> CapsuleReady
+        DecodeTodo --> ActiveReady
+    end
+
+    subgraph StomachFlow["Stomach / validacao e anti-replay"]
+        StomachNew["Stomach::new()<br/>StomachCpCache::new()"]
+        SeenAdd["Stomach::seen_or_add_cp(pill)"]
+        Digest["action_pill::compute_capsule_digest(pill)<br/>capsule_pill::compute_digest()"]
+        CacheCheck{"StomachCpCache::seen_or_add(digest)"}
+        DropSeen["descarta<br/>CP ja visto"]
+        Precheck["Stomach::precheck_for_relay()<br/>action_pill::precheck_for_relay()"]
+        ValidateEnvelope["active_substance::validate_envelope(pill.active)"]
+        ValidateCapsule["capsule_pill::validate_basic(pill.capsule, now_ms)"]
+        ValidateAuth["Stomach::validate_authorized()<br/>action_pill::validate_authorized()"]
+        NetMatch{"network_id_matches()"}
+        IssuerMatch{"issuer_key_matches()"}
+        HashMatch{"capsule_matches_active()"}
+        VerifySig{"verify_capsule_signature()"}
+        Authorized["pill autorizada"]
+        RejectState["Err(ESP_ERR_INVALID_STATE)"]
+        RejectHash["Err(ESP_ERR_INVALID_CRC)"]
+
+        StomachNew --> SeenAdd
+        ActionReady --> SeenAdd --> Digest --> CacheCheck
+        CacheCheck -- "sim" --> DropSeen
+        CacheCheck -- "nao" --> Precheck
+        Precheck --> ValidateEnvelope --> ValidateCapsule --> ValidateAuth
+        ValidateAuth --> NetMatch
+        NetMatch -- "nao" --> RejectState
+        NetMatch -- "sim" --> IssuerMatch
+        IssuerMatch -- "nao" --> RejectState
+        IssuerMatch -- "sim" --> HashMatch
+        HashMatch -- "nao" --> RejectHash
+        HashMatch -- "sim" --> VerifySig
+        VerifySig -- "nao" --> RejectState
+        VerifySig -- "sim" --> Authorized
+    end
+
+    subgraph DigestFlow["Digestao / tentativa de abrir ActiveSubstance"]
+        DigestActive["CapsuleDigester::digest_active_substance()"]
+        ClearOut["DigestedActiveSubstance::clear()<br/>zeroize plaintext<br/>ribosome_table::clear_entry(device)"]
+        TableValid{"table_count_valid(devices)"}
+        HasDevices{"devices.count maior que 0"}
+        DeviceLoop["para cada RibosomeTableEntryRaw"]
+        SecretValid{"device_secret_valid()"}
+        Decrypt["active_enzyme::decrypt_with_secret()<br/>C tenta abrir ciphertext"]
+        DecryptOk{"decrypt ok?"}
+        StorePlain["out_result.plaintext<br/>out_result.device"]
+        NotFound["Err(ESP_ERR_NOT_FOUND)"]
+        InvalidInput["Err invalid arg/size/not supported"]
+
+        Authorized --> DigestActive --> ClearOut --> TableValid
+        TableValid -- "nao" --> InvalidInput
+        TableValid -- "sim" --> HasDevices
+        HasDevices -- "nao" --> NotFound
+        HasDevices -- "sim" --> DeviceLoop --> SecretValid
+        SecretValid -- "nao" --> DeviceLoop
+        SecretValid -- "sim" --> Decrypt --> DecryptOk
+        DecryptOk -- "nao, chave errada" --> DeviceLoop
+        DecryptOk -- "erro estrutural" --> InvalidInput
+        DecryptOk -- "sim" --> StorePlain
+    end
+
+    subgraph MembraneFlow["Membrane / autorizacao semantica"]
+        MembraneNew["Membrane::new()<br/>ribosome_table::init()<br/>rna_membrane::table_init()"]
+        MembraneInit["Membrane::init()<br/>ribosome_store::load_or_init()<br/>rna_membrane::load_or_init()"]
+        GetDevice["Membrane::get_device(mqtt_client_id)"]
+        Allows["Membrane::allows(device, amino_id, payload)"]
+        TemplateValid{"ribosome_table::template_id_valid()"}
+        PayloadValid{"amino_acids::validate_payload()"}
+        FindTemplate["Membrane::find_template()"]
+        TemplateAllows{"rna_membrane::allows(template, amino_id)"}
+        ExecuteTodo["TODO<br/>executor do comando aprovado<br/>plaintext para amino/payload para hardware/MQTT"]
+        DenyAction["nao executa"]
+
+        MembraneNew --> MembraneInit
+        StorePlain --> GetDevice --> Allows
+        Allows --> TemplateValid
+        TemplateValid -- "nao" --> DenyAction
+        TemplateValid -- "sim" --> PayloadValid
+        PayloadValid -- "erro" --> DenyAction
+        PayloadValid -- "ok" --> FindTemplate --> TemplateAllows
+        TemplateAllows -- "nao" --> DenyAction
+        TemplateAllows -- "sim" --> ExecuteTodo
+    end
+
+    subgraph MembraneAdmin["Membrane / manutencao de tabelas"]
+        AddDevice["Membrane::add_device()"]
+        RemoveDevice["Membrane::remove_device()"]
+        AssignTemplate["Membrane::assign_template()"]
+        AddTemplate["Membrane::add_template()"]
+        ReplaceTemplate["Membrane::replace_template()"]
+        RemoveTemplate["Membrane::remove_template()"]
+        SaveMembrane["Membrane::save()<br/>ribosome_store::save()<br/>rna_membrane::save()"]
+
+        MembraneInit --> AddDevice
+        MembraneInit --> RemoveDevice
+        MembraneInit --> AssignTemplate
+        MembraneInit --> AddTemplate
+        MembraneInit --> ReplaceTemplate
+        MembraneInit --> RemoveTemplate
+        AddDevice --> SaveMembrane
+        RemoveDevice --> SaveMembrane
+        AssignTemplate --> SaveMembrane
+        AddTemplate --> SaveMembrane
+        ReplaceTemplate --> SaveMembrane
+        RemoveTemplate --> SaveMembrane
+    end
+
+    subgraph PlatformBoundary["Fronteira Rust -> C"]
+        PActive["platform::active_substance<br/>espelha active_substance.c"]
+        PCapsule["platform::capsule_pill<br/>espelha capsule_pill.c"]
+        PEnzyme["platform::active_enzyme<br/>espelha active_enzyme.c"]
+        PRibosome["platform::ribosome_table / store<br/>espelha ribosome_table.c"]
+        PRna["platform::rna_membrane<br/>espelha rna_membrane.c"]
+        PNetwork["platform de rede/seguranca<br/>wifi, firewall, dns, swarm, telemetry"]
+
+        ValidateActive -.-> PActive
+        ValidateEnvelope -.-> PActive
+        MatchActive -.-> PCapsule
+        ValidateCapsule -.-> PCapsule
+        VerifySig -.-> PCapsule
+        Digest -.-> PCapsule
+        Decrypt -.-> PEnzyme
+        ClearOut -.-> PRibosome
+        MembraneInit -.-> PRibosome
+        MembraneInit -.-> PRna
+        NormalMode -.-> PNetwork
+    end
+
+    class AppMainC,BootRust,RunCode,Run,EventInit,ConfigInit,SetupMode,NormalMode logic;
+    class CapsuleReady,ActiveReady,ActionReady,Authorized,StorePlain ready;
+    class SetReady,SeenAdd,Digest,Precheck,ValidateAuth,DigestActive,Allows,MembraneInit,SaveMembrane logic;
+    class LoadConfig,MatchActive,CacheCheck,NetMatch,IssuerMatch,HashMatch,VerifySig,TableValid,HasDevices,SecretValid,DecryptOk,TemplateValid,PayloadValid,TemplateAllows decision;
+    class TransportTodo,DecodeTodo,ExecuteTodo todo;
+    class PActive,PCapsule,PEnzyme,PRibosome,PRna,PNetwork platform;

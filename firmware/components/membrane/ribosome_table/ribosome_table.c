@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "mbedtls/platform_util.h"
+
 static bool string_valid(const char *value, size_t max_len)
 {
     if (!value || value[0] == '\0') {
@@ -65,7 +67,7 @@ void ribosome_table_clear_entry(ribosome_table_entry_t *entry)
         return;
     }
 
-    memset(entry, 0, sizeof(*entry));
+    mbedtls_platform_zeroize(entry, sizeof(*entry));
 }
 
 esp_err_t ribosome_table_init(ribosome_table_t *table)
@@ -74,7 +76,7 @@ esp_err_t ribosome_table_init(ribosome_table_t *table)
         return ESP_ERR_INVALID_ARG;
     }
 
-    memset(table, 0, sizeof(*table));
+    mbedtls_platform_zeroize(table, sizeof(*table));
     return ESP_OK;
 }
 

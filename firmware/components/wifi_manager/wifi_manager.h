@@ -51,6 +51,7 @@ wifi_manager_status_t wifi_manager_get_status(void);
 
 esp_netif_t *wifi_manager_get_sta_netif(void);
 esp_netif_t *wifi_manager_get_ap_netif(void);
+esp_err_t wifi_manager_get_ap_ip(uint32_t *out_ip);
 
 #ifdef __cplusplus
 }

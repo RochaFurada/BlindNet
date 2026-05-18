@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "app_main.cpp"
+    SRCS "app_main.c"
     INCLUDE_DIRS "."
     REQUIRES
         event_bus
@@ -17,4 +17,5 @@ idf_component_register(
         swarm_agent
         telemetry_agent
         admin_server
+        cortex
 )

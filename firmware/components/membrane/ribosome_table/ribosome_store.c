@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "mbedtls/platform_util.h"
 #include "nvs.h"
 
 #define RIBOSOME_STORE_MAGIC 0x5249424Fu
@@ -60,11 +61,12 @@ static esp_err_t table_to_blob(
     for (size_t i = 0; i < table->count; ++i) {
         err = ribosome_table_add_entry(&validated, &table->entries[i]);
         if (err != ESP_OK) {
+            mbedtls_platform_zeroize(&validated, sizeof(validated));
             return err;
         }
     }
 
-    memset(blob, 0, sizeof(*blob));
+    mbedtls_platform_zeroize(blob, sizeof(*blob));
     blob->magic = RIBOSOME_STORE_MAGIC;
     blob->version = RIBOSOME_STORE_VERSION;
     blob->entry_count = (uint16_t)validated.count;
@@ -74,6 +76,7 @@ static esp_err_t table_to_blob(
     }
 
     blob->checksum = blob_checksum(blob);
+    mbedtls_platform_zeroize(&validated, sizeof(validated));
     return ESP_OK;
 }
 
@@ -103,12 +106,13 @@ static esp_err_t blob_to_table(
     for (size_t i = 0; i < blob->entry_count; ++i) {
         err = ribosome_table_add_entry(&table, &blob->entries[i]);
         if (err != ESP_OK) {
-            ribosome_table_init(&table);
+            mbedtls_platform_zeroize(&table, sizeof(table));
             return err;
         }
     }
 
     *out_table = table;
+    mbedtls_platform_zeroize(&table, sizeof(table));
     return ESP_OK;
 }
 
@@ -132,13 +136,17 @@ esp_err_t ribosome_store_load(ribosome_table_t *out_table)
     nvs_close(handle);
 
     if (err != ESP_OK) {
+        mbedtls_platform_zeroize(&blob, sizeof(blob));
         return err;
     }
     if (size != sizeof(blob)) {
+        mbedtls_platform_zeroize(&blob, sizeof(blob));
         return ESP_ERR_INVALID_SIZE;
     }
 
-    return blob_to_table(&blob, out_table);
+    err = blob_to_table(&blob, out_table);
+    mbedtls_platform_zeroize(&blob, sizeof(blob));
+    return err;
 }
 
 esp_err_t ribosome_store_load_or_init(ribosome_table_t *out_table)
@@ -163,12 +171,14 @@ esp_err_t ribosome_store_save(const ribosome_table_t *table)
     ribosome_store_blob_t blob;
     esp_err_t err = table_to_blob(table, &blob);
     if (err != ESP_OK) {
+        mbedtls_platform_zeroize(&blob, sizeof(blob));
         return err;
     }
 
     nvs_handle_t handle;
     err = nvs_open(NVS_NS, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
+        mbedtls_platform_zeroize(&blob, sizeof(blob));
         return err;
     }
 
@@ -178,6 +188,7 @@ esp_err_t ribosome_store_save(const ribosome_table_t *table)
     }
 
     nvs_close(handle);
+    mbedtls_platform_zeroize(&blob, sizeof(blob));
     return err;
 }
 

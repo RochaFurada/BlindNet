@@ -34,6 +34,11 @@ typedef struct {
 } zone_gateway_status_t;
 
 esp_err_t zone_gateway_start(const zone_gateway_config_t *config);
+esp_err_t zone_gateway_start_and_wait(
+    const zone_gateway_config_t *config,
+    uint32_t timeout_ms,
+    uint32_t poll_ms
+);
 esp_err_t zone_gateway_stop(void);
 
 zone_gateway_status_t zone_gateway_get_status(void);

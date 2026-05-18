@@ -175,6 +175,34 @@ esp_err_t zone_gateway_start(const zone_gateway_config_t *config)
     return ESP_OK;
 }
 
+esp_err_t zone_gateway_start_and_wait(
+    const zone_gateway_config_t *config,
+    uint32_t timeout_ms,
+    uint32_t poll_ms
+)
+{
+    esp_err_t err = zone_gateway_start(config);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (poll_ms == 0) {
+        poll_ms = 250;
+    }
+
+    uint32_t waited = 0;
+    while (waited < timeout_ms) {
+        if (zone_gateway_is_running() && zone_gateway_is_napt_enabled()) {
+            return ESP_OK;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+        waited += poll_ms;
+    }
+
+    return ESP_ERR_TIMEOUT;
+}
+
 esp_err_t zone_gateway_stop(void)
 {
     if (!s_task) return ESP_OK;

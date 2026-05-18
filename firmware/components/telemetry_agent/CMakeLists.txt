@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "telemetry_agent.cpp"
+    SRCS "telemetry_agent.c"
     INCLUDE_DIRS "."
     REQUIRES
         wifi_manager

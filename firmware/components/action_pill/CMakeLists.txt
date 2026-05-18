@@ -3,7 +3,6 @@
 # seus .c entram aqui como fontes deste mesmo componente.
 idf_component_register(
     SRCS
-        "action_pill.cpp"
         "capsule_pill/capsule_pill.c"
         "active_substance/active_substance.c"
         "active_substance/active_enzyme.c"

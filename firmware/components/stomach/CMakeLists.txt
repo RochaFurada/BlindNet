@@ -1,5 +1,9 @@
 idf_component_register(
-    SRCS "stomach.cpp"
+    SRCS
+        "stomach_cp_cache.c"
     INCLUDE_DIRS "."
-    REQUIRES action_pill membrane
+    REQUIRES
+        action_pill
+        membrane
+        mbedtls
 )

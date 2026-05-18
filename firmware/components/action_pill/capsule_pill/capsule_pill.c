@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "mbedtls/md.h"
+#include "mbedtls/platform_util.h"
 #include "mbedtls/pk.h"
 
 static void update_u8(mbedtls_md_context_t *ctx, uint8_t value)
@@ -87,7 +88,7 @@ void capsule_pill_init(capsule_pill_t *capsule)
 {
     if (!capsule) return;
 
-    memset(capsule, 0, sizeof(*capsule));
+    mbedtls_platform_zeroize(capsule, sizeof(*capsule));
     capsule->version = CAPSULE_PILL_VERSION;
     capsule->action_class = CAPSULE_PILL_ACTION_UNKNOWN;
     capsule->signature_alg = CAPSULE_PILL_SIGNATURE_NONE;
@@ -125,8 +126,8 @@ esp_err_t capsule_pill_configure(
 
     capsule->signature_alg = CAPSULE_PILL_SIGNATURE_NONE;
     capsule->signature_len = 0;
-    memset(capsule->reserved1, 0, sizeof(capsule->reserved1));
-    memset(capsule->signature, 0, sizeof(capsule->signature));
+    mbedtls_platform_zeroize(capsule->reserved1, sizeof(capsule->reserved1));
+    mbedtls_platform_zeroize(capsule->signature, sizeof(capsule->signature));
 
     return ESP_OK;
 }
@@ -141,7 +142,7 @@ esp_err_t capsule_pill_set_active_hash(
     memcpy(capsule->active_hash, active_hash, ACTIVE_SUBSTANCE_HASH_LEN);
 
     capsule->signature_len = 0;
-    memset(capsule->signature, 0, sizeof(capsule->signature));
+    mbedtls_platform_zeroize(capsule->signature, sizeof(capsule->signature));
 
     return ESP_OK;
 }
@@ -153,11 +154,16 @@ esp_err_t capsule_pill_bind_active(
 {
     if (!capsule || !substance) return ESP_ERR_INVALID_ARG;
 
-    uint8_t hash[ACTIVE_SUBSTANCE_HASH_LEN];
+    uint8_t hash[ACTIVE_SUBSTANCE_HASH_LEN] = {0};
     esp_err_t err = active_substance_hash(substance, hash);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        mbedtls_platform_zeroize(hash, sizeof(hash));
+        return err;
+    }
 
-    return capsule_pill_set_active_hash(capsule, hash);
+    err = capsule_pill_set_active_hash(capsule, hash);
+    mbedtls_platform_zeroize(hash, sizeof(hash));
+    return err;
 }
 
 esp_err_t capsule_pill_set_signature(
@@ -177,7 +183,7 @@ esp_err_t capsule_pill_set_signature(
 
     capsule->signature_alg = (uint8_t)alg;
     capsule->signature_len = (uint8_t)signature_len;
-    memset(capsule->signature, 0, sizeof(capsule->signature));
+    mbedtls_platform_zeroize(capsule->signature, sizeof(capsule->signature));
     memcpy(capsule->signature, signature, signature_len);
 
     return ESP_OK;
@@ -195,7 +201,7 @@ esp_err_t capsule_pill_set_signature_alg(
 
     capsule->signature_alg = (uint8_t)alg;
     capsule->signature_len = 0;
-    memset(capsule->signature, 0, sizeof(capsule->signature));
+    mbedtls_platform_zeroize(capsule->signature, sizeof(capsule->signature));
 
     return ESP_OK;
 }
@@ -250,10 +256,15 @@ bool capsule_pill_matches_active(
 {
     if (!capsule || !substance) return false;
 
-    uint8_t hash[ACTIVE_SUBSTANCE_HASH_LEN];
-    if (active_substance_hash(substance, hash) != ESP_OK) return false;
+    uint8_t hash[ACTIVE_SUBSTANCE_HASH_LEN] = {0};
+    if (active_substance_hash(substance, hash) != ESP_OK) {
+        mbedtls_platform_zeroize(hash, sizeof(hash));
+        return false;
+    }
 
-    return capsule_pill_constant_time_equal(capsule->active_hash, hash, sizeof(hash));
+    bool equal = capsule_pill_constant_time_equal(capsule->active_hash, hash, sizeof(hash));
+    mbedtls_platform_zeroize(hash, sizeof(hash));
+    return equal;
 }
 
 esp_err_t capsule_pill_compute_signing_digest(
@@ -306,8 +317,9 @@ bool capsule_pill_verify_asymmetric(
     if (!capsule || !public_key || public_key_len == 0) return false;
     if (capsule_pill_validate_basic(capsule, 0) != ESP_OK) return false;
 
-    uint8_t signed_hash[CAPSULE_PILL_DIGEST_LEN];
+    uint8_t signed_hash[CAPSULE_PILL_DIGEST_LEN] = {0};
     if (capsule_compute_signed_hash(capsule, signed_hash) != ESP_OK) {
+        mbedtls_platform_zeroize(signed_hash, sizeof(signed_hash));
         return false;
     }
 
@@ -330,6 +342,7 @@ bool capsule_pill_verify_asymmetric(
     }
 
     mbedtls_pk_free(&pk);
+    mbedtls_platform_zeroize(signed_hash, sizeof(signed_hash));
     return rc == 0;
 }
 

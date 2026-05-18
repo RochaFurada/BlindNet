@@ -10,6 +10,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "mbedtls/platform_util.h"
 #include "nvs_flash.h"
 
 static const char *TAG = "wifi_manager";
@@ -161,7 +162,7 @@ static void handle_ip_event(void *arg, esp_event_base_t event_base, int32_t even
 static esp_err_t configure_sta(void)
 {
     wifi_config_t sta_config;
-    memset(&sta_config, 0, sizeof(sta_config));
+    mbedtls_platform_zeroize(&sta_config, sizeof(sta_config));
 
     safe_copy((char *)sta_config.sta.ssid, sizeof(sta_config.sta.ssid), s_config.sta_ssid);
     safe_copy((char *)sta_config.sta.password, sizeof(sta_config.sta.password), s_config.sta_password);
@@ -170,13 +171,16 @@ static esp_err_t configure_sta(void)
     sta_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
 
     ESP_LOGI(TAG, "Configurando STA: %s", s_config.sta_ssid);
-    return esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+    mbedtls_platform_zeroize(&sta_config, sizeof(sta_config));
+    return err;
 }
 
 static esp_err_t configure_ap(void)
 {
     wifi_config_t ap_config;
-    memset(&ap_config, 0, sizeof(ap_config));
+    mbedtls_platform_zeroize(&ap_config, sizeof(ap_config));
 
     safe_copy((char *)ap_config.ap.ssid, sizeof(ap_config.ap.ssid), s_config.ap_ssid);
     safe_copy((char *)ap_config.ap.password, sizeof(ap_config.ap.password), s_config.ap_password);
@@ -190,7 +194,9 @@ static esp_err_t configure_ap(void)
     ESP_LOGI(TAG, "Configurando SoftAP: ssid=%s canal=%u max=%u",
              s_config.ap_ssid, s_config.ap_channel, s_config.ap_max_connections);
 
-    return esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    mbedtls_platform_zeroize(&ap_config, sizeof(ap_config));
+    return err;
 }
 
 esp_err_t wifi_manager_start(const wifi_manager_config_t *config)
@@ -198,7 +204,7 @@ esp_err_t wifi_manager_start(const wifi_manager_config_t *config)
     if (!config) return ESP_ERR_INVALID_ARG;
     if (s_started) return ESP_OK;
 
-    memset(&s_config, 0, sizeof(s_config));
+    mbedtls_platform_zeroize(&s_config, sizeof(s_config));
     memcpy(&s_config, config, sizeof(wifi_manager_config_t));
 
     if (s_config.ap_channel == 0) s_config.ap_channel = 6;
@@ -209,13 +215,22 @@ esp_err_t wifi_manager_start(const wifi_manager_config_t *config)
     ESP_ERROR_CHECK(init_netif_and_event_loop());
 
     s_event_group = xEventGroupCreate();
-    if (!s_event_group) return ESP_ERR_NO_MEM;
+    if (!s_event_group) {
+        mbedtls_platform_zeroize(&s_config, sizeof(s_config));
+        return ESP_ERR_NO_MEM;
+    }
 
     s_sta_netif = esp_netif_create_default_wifi_sta();
-    if (!s_sta_netif) return ESP_FAIL;
+    if (!s_sta_netif) {
+        mbedtls_platform_zeroize(&s_config, sizeof(s_config));
+        return ESP_FAIL;
+    }
 
     s_ap_netif = esp_netif_create_default_wifi_ap();
-    if (!s_ap_netif) return ESP_FAIL;
+    if (!s_ap_netif) {
+        mbedtls_platform_zeroize(&s_config, sizeof(s_config));
+        return ESP_FAIL;
+    }
 
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));
@@ -226,6 +241,8 @@ esp_err_t wifi_manager_start(const wifi_manager_config_t *config)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(configure_sta());
     ESP_ERROR_CHECK(configure_ap());
+    mbedtls_platform_zeroize(s_config.sta_password, sizeof(s_config.sta_password));
+    mbedtls_platform_zeroize(s_config.ap_password, sizeof(s_config.ap_password));
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_start());
 
@@ -258,6 +275,7 @@ esp_err_t wifi_manager_stop(void)
     s_sta_state = WIFI_MANAGER_STA_DISCONNECTED;
     s_sta_retry_count = 0;
     s_ap_connected_clients = 0;
+    mbedtls_platform_zeroize(&s_config, sizeof(s_config));
     s_started = false;
 
     return ESP_OK;
@@ -293,4 +311,23 @@ esp_netif_t *wifi_manager_get_sta_netif(void)
 esp_netif_t *wifi_manager_get_ap_netif(void)
 {
     return s_ap_netif;
+}
+
+esp_err_t wifi_manager_get_ap_ip(uint32_t *out_ip)
+{
+    if (!out_ip) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_ap_netif) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_netif_ip_info_t ip_info;
+    esp_err_t err = esp_netif_get_ip_info(s_ap_netif, &ip_info);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    *out_ip = ip_info.ip.addr;
+    return ESP_OK;
 }
