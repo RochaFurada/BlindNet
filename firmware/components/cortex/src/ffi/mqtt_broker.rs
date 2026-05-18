@@ -69,5 +69,13 @@ unsafe extern "C" {
         qos: u8,
         retain: bool,
     ) -> EspErr;
+    pub fn mqtt_broker_publish_to_client(
+        client_id: *const c_char,
+        topic: *const c_char,
+        payload: *const c_void,
+        payload_len: usize,
+        qos: u8,
+        retain: bool,
+    ) -> EspErr;
     pub fn mqtt_broker_get_stats() -> MqttBrokerStatsRaw;
 }

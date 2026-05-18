@@ -75,6 +75,15 @@ esp_err_t mqtt_broker_publish(
     bool retain
 );
 
+esp_err_t mqtt_broker_publish_to_client(
+    const char *client_id,
+    const char *topic,
+    const void *payload,
+    size_t payload_len,
+    uint8_t qos,
+    bool retain
+);
+
 mqtt_broker_stats_t mqtt_broker_get_stats(void);
 
 #ifdef __cplusplus

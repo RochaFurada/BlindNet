@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -9,6 +10,18 @@
 #include "freertos/task.h"
 #include "lwip/inet.h"
 #include "mosq_broker.h"
+
+#ifdef __has_include
+#if __has_include("mosquitto_broker.h")
+#include "mosquitto.h"
+#include "mosquitto_broker.h"
+#define MQTT_BROKER_HAS_INTERNAL_PUBLISH 1
+#endif
+#endif
+
+#ifndef MQTT_BROKER_HAS_INTERNAL_PUBLISH
+#define MQTT_BROKER_HAS_INTERNAL_PUBLISH 0
+#endif
 
 static const char *TAG = "mqtt_broker";
 
@@ -262,6 +275,67 @@ bool mqtt_broker_is_running(void)
     return s_running;
 }
 
+static esp_err_t broker_publish_internal(
+    const char *client_id,
+    const char *topic,
+    const void *payload,
+    size_t payload_len,
+    uint8_t qos,
+    bool retain
+)
+{
+    if (client_id && client_id[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!topic || topic[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (payload_len > 0 && !payload) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (payload_len > s_config.max_payload_len || payload_len > (size_t)INT_MAX) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (qos > 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+#if MQTT_BROKER_HAS_INTERNAL_PUBLISH
+    int rc = mosquitto_broker_publish_copy(
+        client_id,
+        topic,
+        (int)payload_len,
+        payload_len > 0 ? payload : NULL,
+        qos,
+        retain,
+        NULL
+    );
+
+    switch (rc) {
+        case MOSQ_ERR_SUCCESS:
+            return ESP_OK;
+        case MOSQ_ERR_INVAL:
+            return ESP_ERR_INVALID_ARG;
+        case MOSQ_ERR_NOMEM:
+            return ESP_ERR_NO_MEM;
+        default:
+            ESP_LOGW(TAG, "falha ao publicar no broker rc=%d topic=%s", rc, topic);
+            return ESP_FAIL;
+    }
+#else
+    (void)client_id;
+    (void)payload;
+    (void)qos;
+    (void)retain;
+
+    ESP_LOGW(TAG, "publicacao interna do Mosquitto indisponivel topic=%s", topic);
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
 esp_err_t mqtt_broker_publish(
     const char *topic,
     const void *payload,
@@ -270,13 +344,23 @@ esp_err_t mqtt_broker_publish(
     bool retain
 )
 {
-    (void)topic;
-    (void)payload;
-    (void)payload_len;
-    (void)qos;
-    (void)retain;
+    return broker_publish_internal(NULL, topic, payload, payload_len, qos, retain);
+}
 
-    return ESP_ERR_NOT_SUPPORTED;
+esp_err_t mqtt_broker_publish_to_client(
+    const char *client_id,
+    const char *topic,
+    const void *payload,
+    size_t payload_len,
+    uint8_t qos,
+    bool retain
+)
+{
+    if (!client_id) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return broker_publish_internal(client_id, topic, payload, payload_len, qos, retain);
 }
 
 mqtt_broker_stats_t mqtt_broker_get_stats(void)

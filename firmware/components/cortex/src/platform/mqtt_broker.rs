@@ -1,7 +1,7 @@
 use core::ffi::{c_char, c_void};
 
 use crate::ffi::mqtt_broker;
-use crate::platform::{esp_result, Result};
+use crate::platform::{self, esp_result, Result};
 
 pub use crate::ffi::mqtt_broker::{
     MqttBrokerConfigRaw, MqttBrokerConnectCb, MqttBrokerConnectRaw, MqttBrokerMessageCb,
@@ -36,6 +36,71 @@ pub unsafe fn publish(
     esp_result(unsafe {
         mqtt_broker::mqtt_broker_publish(topic, payload, payload_len, qos, retain)
     })
+}
+
+pub unsafe fn publish_to_client(
+    client_id: *const c_char,
+    topic: *const c_char,
+    payload: *const c_void,
+    payload_len: usize,
+    qos: u8,
+    retain: bool,
+) -> Result {
+    esp_result(unsafe {
+        mqtt_broker::mqtt_broker_publish_to_client(
+            client_id,
+            topic,
+            payload,
+            payload_len,
+            qos,
+            retain,
+        )
+    })
+}
+
+pub fn publish_cstr(topic: *const c_char, payload: &[u8], qos: u8, retain: bool) -> Result {
+    if topic.is_null() {
+        return Err(platform::ESP_ERR_INVALID_ARG);
+    }
+    if payload.len() > MQTT_BROKER_PAYLOAD_MAX_LEN {
+        return Err(platform::ESP_ERR_INVALID_SIZE);
+    }
+
+    unsafe {
+        publish(
+            topic,
+            payload.as_ptr().cast::<c_void>(),
+            payload.len(),
+            qos,
+            retain,
+        )
+    }
+}
+
+pub fn publish_to_client_cstr(
+    client_id: *const c_char,
+    topic: *const c_char,
+    payload: &[u8],
+    qos: u8,
+    retain: bool,
+) -> Result {
+    if client_id.is_null() || topic.is_null() {
+        return Err(platform::ESP_ERR_INVALID_ARG);
+    }
+    if payload.len() > MQTT_BROKER_PAYLOAD_MAX_LEN {
+        return Err(platform::ESP_ERR_INVALID_SIZE);
+    }
+
+    unsafe {
+        publish_to_client(
+            client_id,
+            topic,
+            payload.as_ptr().cast::<c_void>(),
+            payload.len(),
+            qos,
+            retain,
+        )
+    }
 }
 
 pub fn stats() -> MqttBrokerStatsRaw {
