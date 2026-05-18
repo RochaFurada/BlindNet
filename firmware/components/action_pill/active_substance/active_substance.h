@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
+#include "amino_acids.h"
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -18,7 +18,9 @@ extern "C" {
 #define ACTIVE_SUBSTANCE_HASH_LEN 32
 #define ACTIVE_SUBSTANCE_NONCE_LEN 12
 #define ACTIVE_SUBSTANCE_TAG_LEN 16
-
+#define ACTIVE_SUBSTANCE_DEVICE_ID_LEN 32
+#define ACTIVE_SUBSTANCE_TOPIC_LEN 32
+#define ACTIVE_SUBSTANCE_COMMAND_RESERVED_LEN 3
 /*
  * Active Substance = composto ativo.
  *
@@ -33,6 +35,15 @@ typedef enum {
     ACTIVE_SUBSTANCE_CIPHER_AES_256_GCM = 2,
     ACTIVE_SUBSTANCE_CIPHER_CHACHA20_POLY1305 = 3
 } active_substance_cipher_t;
+
+typedef struct {
+    char device_id[ACTIVE_SUBSTANCE_DEVICE_ID_LEN];
+    char topic[ACTIVE_SUBSTANCE_TOPIC_LEN];
+    amino_acid_id_t amino_id;
+    uint8_t payload_type;
+    uint8_t reserved[ACTIVE_SUBSTANCE_COMMAND_RESERVED_LEN];
+    int32_t payload_i32;
+} active_substance_command_t;
 
 /*
  * Blob cifrado AEAD.
@@ -49,6 +60,18 @@ typedef struct {
     uint8_t tag[ACTIVE_SUBSTANCE_TAG_LEN];
     uint8_t ciphertext[ACTIVE_SUBSTANCE_CIPHERTEXT_MAX_LEN];
 } active_substance_t;
+
+void active_substance_command_clear(active_substance_command_t *command);
+
+esp_err_t active_substance_command_validate(
+    const active_substance_command_t *command
+);
+
+esp_err_t active_substance_parse_command(
+    const void *plaintext,
+    size_t plaintext_len,
+    active_substance_command_t *out_command
+);
 
 void active_substance_init(active_substance_t *substance);
 

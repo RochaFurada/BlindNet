@@ -41,16 +41,14 @@ impl Default for StomachSeenResult {
 
 #[repr(C)]
 pub struct DigestedActiveSubstance {
-    pub plaintext: [u8; active_enzyme::ACTIVE_ENZYME_PLAINTEXT_MAX_LEN],
-    pub plaintext_len: usize,
+    pub command: active_substance::ActiveSubstanceCommandRaw,
     pub device: RibosomeTableEntryRaw,
 }
 
 impl DigestedActiveSubstance {
     pub fn new() -> Self {
         let mut result = Self {
-            plaintext: [0u8; active_enzyme::ACTIVE_ENZYME_PLAINTEXT_MAX_LEN],
-            plaintext_len: 0,
+            command: active_substance::new_command(),
             device: empty_ribosome_entry(),
         };
 
@@ -59,8 +57,7 @@ impl DigestedActiveSubstance {
     }
 
     pub fn clear(&mut self) {
-        self.plaintext.zeroize();
-        self.plaintext_len = 0;
+        active_substance::clear_command(&mut self.command);
         ribosome_table::clear_entry(&mut self.device);
     }
 }
@@ -135,17 +132,24 @@ impl CapsuleDigester {
                 continue;
             }
 
+            let mut plaintext = [0u8; active_enzyme::ACTIVE_ENZYME_PLAINTEXT_MAX_LEN];
             let mut plaintext_len = 0;
             match active_enzyme::decrypt_with_secret(
                 &pill.active,
                 &candidate.device_secret,
                 candidate.epoch,
                 aad,
-                &mut out_result.plaintext,
+                &mut plaintext,
                 &mut plaintext_len,
             ) {
                 Ok(()) => {
-                    out_result.plaintext_len = plaintext_len;
+                    let parse_result = active_substance::parse_command(
+                        &plaintext[..plaintext_len],
+                        &mut out_result.command,
+                    );
+                    plaintext.zeroize();
+                    parse_result?;
+
                     out_result.device = *candidate;
                     return Ok(());
                 }
@@ -154,9 +158,13 @@ impl CapsuleDigester {
                         || err == platform::ESP_ERR_INVALID_SIZE
                         || err == platform::ESP_ERR_INVALID_ARG =>
                 {
+                    plaintext.zeroize();
                     return Err(err);
                 }
-                Err(_) => continue,
+                Err(_) => {
+                    plaintext.zeroize();
+                    continue;
+                }
             }
         }
 

@@ -12,4 +12,5 @@ idf_component_register(
         "active_substance"
     REQUIRES
         mbedtls
+        membrane
 )

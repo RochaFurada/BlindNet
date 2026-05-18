@@ -1,15 +1,40 @@
 use core::ffi::{c_char, c_void};
+use core::mem::MaybeUninit;
 
 use crate::ffi::active_substance;
 use crate::platform::{esp_result, Result};
 
 pub use crate::ffi::active_substance::{
-    ActiveSubstanceCipher, ActiveSubstanceRaw, ACTIVE_SUBSTANCE_CIPHERTEXT_MAX_LEN,
-    ACTIVE_SUBSTANCE_CIPHER_AES_128_GCM, ACTIVE_SUBSTANCE_CIPHER_AES_256_GCM,
-    ACTIVE_SUBSTANCE_CIPHER_CHACHA20_POLY1305, ACTIVE_SUBSTANCE_CIPHER_UNKNOWN,
-    ACTIVE_SUBSTANCE_HASH_LEN, ACTIVE_SUBSTANCE_NONCE_LEN, ACTIVE_SUBSTANCE_TAG_LEN,
-    ACTIVE_SUBSTANCE_VERSION,
+    ActiveSubstanceCipher, ActiveSubstanceCommandRaw, ActiveSubstanceRaw,
+    ACTIVE_SUBSTANCE_CIPHERTEXT_MAX_LEN, ACTIVE_SUBSTANCE_CIPHER_AES_128_GCM,
+    ACTIVE_SUBSTANCE_CIPHER_AES_256_GCM, ACTIVE_SUBSTANCE_CIPHER_CHACHA20_POLY1305,
+    ACTIVE_SUBSTANCE_CIPHER_UNKNOWN, ACTIVE_SUBSTANCE_COMMAND_RESERVED_LEN,
+    ACTIVE_SUBSTANCE_DEVICE_ID_LEN, ACTIVE_SUBSTANCE_HASH_LEN, ACTIVE_SUBSTANCE_NONCE_LEN,
+    ACTIVE_SUBSTANCE_TAG_LEN, ACTIVE_SUBSTANCE_TOPIC_LEN, ACTIVE_SUBSTANCE_VERSION,
 };
+
+pub fn new_command() -> ActiveSubstanceCommandRaw {
+    let raw = MaybeUninit::<ActiveSubstanceCommandRaw>::zeroed();
+    unsafe { raw.assume_init() }
+}
+
+pub fn clear_command(command: &mut ActiveSubstanceCommandRaw) {
+    unsafe { active_substance::active_substance_command_clear(command) };
+}
+
+pub fn validate_command(command: &ActiveSubstanceCommandRaw) -> Result {
+    esp_result(unsafe { active_substance::active_substance_command_validate(command) })
+}
+
+pub fn parse_command(plaintext: &[u8], out_command: &mut ActiveSubstanceCommandRaw) -> Result {
+    esp_result(unsafe {
+        active_substance::active_substance_parse_command(
+            plaintext.as_ptr().cast::<c_void>(),
+            plaintext.len(),
+            out_command,
+        )
+    })
+}
 
 pub fn init(substance: &mut ActiveSubstanceRaw) {
     unsafe { active_substance::active_substance_init(substance) };

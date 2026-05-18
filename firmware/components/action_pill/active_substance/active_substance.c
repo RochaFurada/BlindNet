@@ -19,6 +19,98 @@ static void update_u16_le(mbedtls_md_context_t *ctx, uint16_t value)
     mbedtls_md_update(ctx, bytes, sizeof(bytes));
 }
 
+static bool bytes_all_zero(const uint8_t *bytes, size_t len)
+{
+    if (!bytes || len == 0) {
+        return true;
+    }
+
+    uint8_t any = 0;
+    for (size_t i = 0; i < len; ++i) {
+        any |= bytes[i];
+    }
+
+    return any == 0;
+}
+
+static bool c_string_field_valid(const char *field, size_t len)
+{
+    if (!field || len == 0 || field[0] == '\0') {
+        return false;
+    }
+
+    for (size_t i = 0; i < len; ++i) {
+        if (field[i] == '\0') {
+            for (size_t j = i + 1; j < len; ++j) {
+                if (field[j] != '\0') {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void active_substance_command_clear(active_substance_command_t *command)
+{
+    if (!command) return;
+    mbedtls_platform_zeroize(command, sizeof(*command));
+}
+
+esp_err_t active_substance_command_validate(
+    const active_substance_command_t *command
+)
+{
+    if (!command) return ESP_ERR_INVALID_ARG;
+
+    if (!c_string_field_valid(command->device_id, sizeof(command->device_id))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!c_string_field_valid(command->topic, sizeof(command->topic))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!bytes_all_zero(command->reserved, sizeof(command->reserved))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const amino_acid_t *acid = amino_acid_find(command->amino_id);
+    if (!acid) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if ((uint8_t)acid->value_type != command->payload_type) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const int32_t *payload =
+        command->payload_type == AMINO_VALUE_NONE ? NULL : &command->payload_i32;
+
+    return amino_acid_validate_payload(command->amino_id, payload);
+}
+
+esp_err_t active_substance_parse_command(
+    const void *plaintext,
+    size_t plaintext_len,
+    active_substance_command_t *out_command
+)
+{
+    if (!plaintext || !out_command) return ESP_ERR_INVALID_ARG;
+    if (plaintext_len != sizeof(active_substance_command_t)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    active_substance_command_clear(out_command);
+    memcpy(out_command, plaintext, sizeof(*out_command));
+
+    esp_err_t err = active_substance_command_validate(out_command);
+    if (err != ESP_OK) {
+        active_substance_command_clear(out_command);
+    }
+
+    return err;
+}
+
 /*
  * Inicializa em estado vazio e conhecido.
  */
