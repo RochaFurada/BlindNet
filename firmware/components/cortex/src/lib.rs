@@ -4,6 +4,7 @@ pub mod boot;
 pub mod ffi;
 pub mod logic;
 pub mod platform;
+pub mod conscience;
 
 use core::panic::PanicInfo;
 
