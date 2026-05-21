@@ -9,5 +9,8 @@ idf_component_register(
         "ribosome_table"
         "rna_membrane"
         "rna_membrane/amino_acids"
-    REQUIRES nvs_flash mbedtls
+    REQUIRES
+        esp_common
+        mbedtls
+        nvs_flash
 )

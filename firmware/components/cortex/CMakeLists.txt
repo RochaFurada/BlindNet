@@ -7,6 +7,7 @@ idf_component_register(
         config_store
         device_registry
         dns_filter
+        esp_common
         event_bus
         flow_table
         g2g_ble

@@ -2,6 +2,7 @@ idf_component_register(
     SRCS "telemetry_agent.c"
     INCLUDE_DIRS "."
     REQUIRES
+        esp_common
         wifi_manager
         zone_gateway
         flow_table
@@ -10,4 +11,7 @@ idf_component_register(
         quarantine_manager
         swarm_agent
         esp_timer
+        freertos
+        log
+        lwip
 )

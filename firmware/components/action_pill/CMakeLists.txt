@@ -11,6 +11,7 @@ idf_component_register(
         "capsule_pill"
         "active_substance"
     REQUIRES
+        esp_common
         mbedtls
         membrane
 )
