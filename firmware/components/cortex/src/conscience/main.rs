@@ -6,11 +6,11 @@ use crate::platform;
 use crate::platform::admin_server::AdminServerConfigRaw;
 use crate::platform::config::ZoneguardConfigRaw;
 use crate::platform::dns_filter::{DnsFilterConfigRaw, DnsFilterRuleRaw};
+use crate::platform::event_bus::ZgEventRaw;
 use crate::platform::flow_table::{FlowKeyRaw, FlowTableConfigRaw};
 use crate::platform::mqtt_broker::{
     MqttBrokerConfigRaw, MqttBrokerConnectRaw, MqttBrokerMessageRaw,
 };
-use crate::platform::event_bus::ZgEventRaw;
 use crate::platform::policy_engine::{PolicyEngineConfigRaw, PolicyRuleRaw};
 use crate::platform::quarantine_manager::{QuarantineManagerConfigRaw, QuarantineMode};
 use crate::platform::rate_limiter::{RateLimitParamsRaw, RateLimitRuleRaw, RateLimiterConfigRaw};
@@ -20,6 +20,8 @@ use crate::platform::{
     policy_engine, quarantine_manager, rate_limiter, setup_ap, swarm_agent, telemetry_agent,
     wifi_manager, zone_firewall, zone_gateway, Result,
 };
+
+use crate::logic::g2g;
 
 const SETUP_SSID: &[u8] = b"ZoneGuard_Setup\0";
 const SETUP_PASSWORD: &[u8] = b"setup1234\0";
@@ -158,6 +160,8 @@ fn enter_normal_mode(cfg: &ZoneguardConfigRaw) -> Result {
     unsafe {
         let _ = mqtt_broker::start(Some(&mqtt_config));
     }
+
+    g2g::start(cfg.guardian_id, cfg.zone_id)?;
 
     let swarm_broadcast = if cfg.swarm_broadcast[0] != 0 {
         cfg.swarm_broadcast.as_ptr()
@@ -350,6 +354,7 @@ unsafe extern "C" fn on_mqtt_connect(
     !event.is_null()
 }
 
+// Retirar depdedência C direta
 unsafe extern "C" fn on_event(_event: *const ZgEventRaw, _ctx: *mut c_void) {}
 
 unsafe extern "C" fn on_swarm_frame(frame: *const swarm_agent::SwarmFrameRaw, _ctx: *mut c_void) {

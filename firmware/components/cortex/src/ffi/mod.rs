@@ -24,6 +24,7 @@ pub mod device_registry;
 pub mod dns_filter;
 pub mod event_bus;
 pub mod flow_table;
+pub mod g2g_ble;
 pub mod mqtt_broker;
 pub mod policy_engine;
 pub mod quarantine_manager;

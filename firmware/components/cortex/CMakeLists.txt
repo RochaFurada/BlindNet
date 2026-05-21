@@ -9,6 +9,7 @@ idf_component_register(
         dns_filter
         event_bus
         flow_table
+        g2g_ble
         membrane
         MQTT_broker
         policy_engine
