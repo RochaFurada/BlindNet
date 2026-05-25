@@ -35,8 +35,6 @@ pub mod rna_membrane;
 pub mod setup_ap;
 pub mod setup_button;
 pub mod stomach_cp_cache;
-pub mod swarm_agent;
-pub mod telemetry_agent;
 pub mod wifi_manager;
 pub mod zone_firewall;
 pub mod zone_gateway;

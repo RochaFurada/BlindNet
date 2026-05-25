@@ -15,8 +15,6 @@ idf_component_register(
         MQTT_broker
         dns_filter
         zone_firewall
-        swarm_agent
-        telemetry_agent
         admin_server
         setup_button
         cortex

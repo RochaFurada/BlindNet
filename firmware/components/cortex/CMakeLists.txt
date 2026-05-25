@@ -19,8 +19,6 @@ idf_component_register(
         setup_ap
         setup_button
         stomach
-        swarm_agent
-        telemetry_agent
         wifi_manager
         zone_firewall
         zone_gateway
@@ -100,8 +98,6 @@ target_link_libraries(cortex_rust INTERFACE
     idf::setup_ap
     idf::setup_button
     idf::stomach
-    idf::swarm_agent
-    idf::telemetry_agent
     idf::wifi_manager
     idf::zone_firewall
     idf::zone_gateway

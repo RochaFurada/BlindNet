@@ -1,5 +1,5 @@
 use core::ffi::{c_char, c_void};
-use core::mem::{self, MaybeUninit};
+use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::platform;
@@ -12,32 +12,24 @@ use crate::platform::mqtt_broker::{
     MqttBrokerConfigRaw, MqttBrokerConnectRaw, MqttBrokerMessageRaw,
 };
 use crate::platform::policy_engine::{PolicyEngineConfigRaw, PolicyRuleRaw};
-use crate::platform::quarantine_manager::{QuarantineManagerConfigRaw, QuarantineMode};
+use crate::platform::quarantine_manager::QuarantineManagerConfigRaw;
 use crate::platform::rate_limiter::{RateLimitParamsRaw, RateLimitRuleRaw, RateLimiterConfigRaw};
 use crate::platform::wifi_manager::WifiManagerConfigRaw;
 use crate::platform::{
     admin_server, config, device_registry, dns_filter, event_bus, flow_table, mqtt_broker,
-    policy_engine, quarantine_manager, rate_limiter, setup_ap, setup_button, swarm_agent,
-    telemetry_agent, wifi_manager, zone_firewall, zone_gateway, Result,
+    policy_engine, quarantine_manager, rate_limiter, setup_ap, setup_button, wifi_manager,
+    zone_firewall, zone_gateway, Result,
 };
 
 use crate::logic::g2g;
 
 const SETUP_SSID: &[u8] = b"ZoneGuard_Setup\0";
 const SETUP_PASSWORD: &[u8] = b"setup1234\0";
-const DEFAULT_SWARM_BROADCAST: &[u8] = b"255.255.255.255\0";
 const ADMIN_SETUP_BUTTON_GPIO: i32 = setup_button::SETUP_BUTTON_DEFAULT_GPIO;
 const ADMIN_SETUP_HOLD_MS: u32 = setup_button::SETUP_BUTTON_DEFAULT_HOLD_MS;
 const ADMIN_SETUP_POLL_MS: u32 = setup_button::SETUP_BUTTON_DEFAULT_POLL_MS;
 const ADMIN_SETUP_UNLOCK_WINDOW_MS: u32 = 30_000;
 
-const SWARM_FRAME_PAYLOAD_OFFSET: usize =
-    2 + 1 + 1 + 4 + 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + swarm_agent::SWARM_AGENT_HMAC_LEN;
-const SWARM_Q_MODE_OFFSET: usize = 9;
-const SWARM_Q_RISK_OFFSET: usize = 11;
-const SWARM_Q_SUBJECT_IP_OFFSET: usize = 12;
-const SWARM_Q_TTL_MS_OFFSET: usize = 16;
-const SWARM_Q_REASON_OFFSET: usize = 20;
 
 pub fn run_code() -> platform::EspErr {
     match run() {
@@ -172,47 +164,7 @@ fn enter_normal_mode(cfg: &ZoneguardConfigRaw) -> Result {
 
     g2g::start(cfg.guardian_id, cfg.zone_id)?;
 
-    let swarm_broadcast = if cfg.swarm_broadcast[0] != 0 {
-        cfg.swarm_broadcast.as_ptr()
-    } else {
-        cstr_ptr(DEFAULT_SWARM_BROADCAST)
-    };
-    let swarm_config = swarm_agent::SwarmAgentConfigRaw {
-        guardian_id: cfg.guardian_id,
-        zone_id: cfg.zone_id,
-        udp_port: if cfg.swarm_port != 0 {
-            cfg.swarm_port
-        } else {
-            4747
-        },
-        broadcast_addr: swarm_broadcast,
-        hello_interval_ms: 5_000,
-        zone_state_interval_ms: 7_000,
-        verify_mode: swarm_agent::SWARM_VERIFY_HMAC_SHA256,
-        shared_key: cfg.swarm_key.as_ptr(),
-        shared_key_len: cfg.swarm_key_len as usize,
-    };
-    unsafe {
-        swarm_agent::set_frame_callback(Some(on_swarm_frame), ptr::null_mut());
-        let _ = swarm_agent::start(Some(&swarm_config));
-    }
-
-    let telemetry_config = telemetry_agent::TelemetryAgentConfigRaw {
-        zone_id: cfg.zone_id,
-        guardian_id: cfg.guardian_id,
-        interval_ms: 5_000,
-        outputs: telemetry_agent::TELEMETRY_OUTPUT_SERIAL as u32,
-        udp_host: ptr::null(),
-        udp_port: if cfg.telemetry_port != 0 {
-            cfg.telemetry_port
-        } else {
-            5757
-        },
-        send_on_start: true,
-    };
-    unsafe { telemetry_agent::start(Some(&telemetry_config))? };
-
-    test_zone_firewall_fake_flow()
+    Ok(())
 }
 
 fn init_and_start_dns(dns_config: &DnsFilterConfigRaw) -> Result {
@@ -382,47 +334,6 @@ unsafe extern "C" fn on_mqtt_connect(
 
 // Retirar depdedência C direta
 unsafe extern "C" fn on_event(_event: *const ZgEventRaw, _ctx: *mut c_void) {}
-
-unsafe extern "C" fn on_swarm_frame(frame: *const swarm_agent::SwarmFrameRaw, _ctx: *mut c_void) {
-    if frame.is_null() {
-        return;
-    }
-
-    let base = frame.cast::<u8>();
-    let frame_type = unsafe { ptr::read_unaligned(base.add(3)) };
-    if frame_type != swarm_agent::SWARM_MSG_QUARANTINE_NOTICE as u8 {
-        return;
-    }
-
-    let payload_len = unsafe { ptr::read_unaligned(base.add(18).cast::<u16>()) };
-    if (payload_len as usize) < mem::size_of::<swarm_agent::SwarmPayloadQuarantineNoticeRaw>() {
-        return;
-    }
-
-    let payload = unsafe { base.add(SWARM_FRAME_PAYLOAD_OFFSET) };
-    let mode = unsafe { ptr::read_unaligned(payload.add(SWARM_Q_MODE_OFFSET)) };
-    let risk_score = unsafe { ptr::read_unaligned(payload.add(SWARM_Q_RISK_OFFSET)) };
-    let subject_ip =
-        unsafe { ptr::read_unaligned(payload.add(SWARM_Q_SUBJECT_IP_OFFSET).cast::<u32>()) };
-    let ttl_ms = unsafe { ptr::read_unaligned(payload.add(SWARM_Q_TTL_MS_OFFSET).cast::<u32>()) };
-    let reason = unsafe { payload.add(SWARM_Q_REASON_OFFSET).cast::<c_char>() };
-
-    let _ = unsafe {
-        quarantine_manager::add_ip(
-            subject_ip,
-            mode as QuarantineMode,
-            quarantine_manager::QUARANTINE_SOURCE_SWARM,
-            ttl_ms,
-            risk_score,
-            reason,
-        )
-    };
-    let _ = device_registry::set_state_by_ip(
-        subject_ip,
-        device_registry::DEVICE_STATE_QUARANTINED,
-        risk_score,
-    );
-}
 
 fn cstr_ptr(bytes: &'static [u8]) -> *const c_char {
     bytes.as_ptr().cast()
