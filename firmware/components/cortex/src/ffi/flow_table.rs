@@ -39,3 +39,60 @@ pub struct FlowKeyRaw {
     pub proto: u8,
 }
 
+#[repr(C)]
+pub struct FlowEntryRaw {
+    pub key: FlowKeyRaw,
+    pub direction: FlowDirection,
+    pub state: FlowState,
+    pub packets: u64,
+    pub bytes: u64,
+    pub first_seen_ms: u32,
+    pub last_seen_ms: u32,
+    pub last_policy_action: u32,
+    pub flags: u32,
+    pub risk_score: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+pub struct FlowTableConfigRaw {
+    pub max_idle_ms: u32,
+    pub hard_ttl_ms: u32,
+    pub evict_lru_when_full: bool,
+}
+
+#[repr(C)]
+pub struct FlowTableStatsRaw {
+    pub capacity: u32,
+    pub active_entries: u32,
+    pub total_packets: u64,
+    pub total_bytes: u64,
+    pub created_flows: u64,
+    pub updated_flows: u64,
+    pub evicted_flows: u64,
+    pub expired_flows: u64,
+    pub dropped_updates: u64,
+}
+
+pub type FlowTableIterCb =
+    Option<unsafe extern "C" fn(entry: *const FlowEntryRaw, user_ctx: *mut c_void)>;
+
+unsafe extern "C" {
+    pub fn flow_table_init(config: *const FlowTableConfigRaw) -> EspErr;
+    pub fn flow_table_reset();
+    pub fn flow_table_touch(
+        key: *const FlowKeyRaw,
+        direction: FlowDirection,
+        bytes: u32,
+        out_entry: *mut FlowEntryRaw,
+    ) -> FlowTouchResult;
+    pub fn flow_table_find(key: *const FlowKeyRaw, out_entry: *mut FlowEntryRaw) -> bool;
+    pub fn flow_table_set_state(key: *const FlowKeyRaw, state: FlowState) -> bool;
+    pub fn flow_table_set_risk(key: *const FlowKeyRaw, risk_score: u8) -> bool;
+    pub fn flow_table_set_policy_action(key: *const FlowKeyRaw, action: u32) -> bool;
+    pub fn flow_table_expire_old() -> u32;
+    pub fn flow_table_get_stats() -> FlowTableStatsRaw;
+    pub fn flow_table_foreach(cb: FlowTableIterCb, user_ctx: *mut c_void);
+    pub fn flow_table_hash_key(key: *const FlowKeyRaw) -> u32;
+    pub fn flow_table_key_equals(a: *const FlowKeyRaw, b: *const FlowKeyRaw) -> bool;
+}
