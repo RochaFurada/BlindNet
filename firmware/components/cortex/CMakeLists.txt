@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "cortex_component.c"
     INCLUDE_DIRS "include"
-    REQUIRES
+    PRIV_REQUIRES
         action_pill
         admin_server
         config_store
@@ -43,6 +43,7 @@ set(CORTEX_RUST_PROFILE "release")
 set(CORTEX_RUST_LIB
     "${CORTEX_TARGET_DIR}/${CORTEX_RUST_TARGET}/${CORTEX_RUST_PROFILE}/libcortex.a"
 )
+
 file(GLOB_RECURSE CORTEX_RUST_SOURCES CONFIGURE_DEPENDS
     "${CORTEX_CRATE_DIR}/src/*.rs"
 )
@@ -72,7 +73,40 @@ add_custom_command(
 )
 
 add_custom_target(cortex_rust_build DEPENDS "${CORTEX_RUST_LIB}")
+
+add_library(cortex_rust STATIC IMPORTED GLOBAL)
+set_target_properties(cortex_rust PROPERTIES
+    IMPORTED_LOCATION "${CORTEX_RUST_LIB}"
+)
+
+add_dependencies(cortex_rust cortex_rust_build)
 add_dependencies(${COMPONENT_LIB} cortex_rust_build)
-target_link_libraries(${COMPONENT_LIB} PUBLIC "${CORTEX_RUST_LIB}")
+
+target_link_libraries(cortex_rust INTERFACE
+    idf::action_pill
+    idf::admin_server
+    idf::config_store
+    idf::device_registry
+    idf::dns_filter
+    idf::esp_common
+    idf::event_bus
+    idf::flow_table
+    idf::g2g_ble
+    idf::membrane
+    idf::MQTT_broker
+    idf::policy_engine
+    idf::quarantine_manager
+    idf::rate_limiter
+    idf::setup_ap
+    idf::setup_button
+    idf::stomach
+    idf::swarm_agent
+    idf::telemetry_agent
+    idf::wifi_manager
+    idf::zone_firewall
+    idf::zone_gateway
+)
+
+target_link_libraries(${COMPONENT_LIB} PRIVATE cortex_rust)
 
 set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${CORTEX_TARGET_DIR}")

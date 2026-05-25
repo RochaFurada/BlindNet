@@ -8,7 +8,6 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "host/ble_att.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
 #include "host/ble_hs.h"
@@ -26,6 +25,32 @@ static const char *TAG = "g2g_ble";
 #define G2G_TX_TASK_STACK 4096
 #define G2G_TX_TASK_PRIO 5
 #define G2G_CONN_TIMEOUT_MS 7000
+
+#ifndef BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN
+#define BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN 0x0d
+#endif
+
+#ifndef BLE_ATT_ERR_UNLIKELY
+#define BLE_ATT_ERR_UNLIKELY 0x0e
+#endif
+
+#ifndef BLE_HS_ADV_F_DISC_GEN
+#ifdef BLE_GAP_ADV_F_DISC_GEN
+#define BLE_HS_ADV_F_DISC_GEN BLE_GAP_ADV_F_DISC_GEN
+#else
+#define BLE_HS_ADV_F_DISC_GEN 0x02
+#endif
+#endif
+
+#ifndef BLE_HS_ADV_F_BREDR_UNSUP
+#ifdef BLE_GAP_ADV_F_BREDR_UNSUP
+#define BLE_HS_ADV_F_BREDR_UNSUP BLE_GAP_ADV_F_BREDR_UNSUP
+#else
+#define BLE_HS_ADV_F_BREDR_UNSUP 0x04
+#endif
+#endif
+
+int ble_att_set_preferred_mtu(uint16_t mtu);
 
 static const ble_uuid128_t G2G_SERVICE_UUID =
 {

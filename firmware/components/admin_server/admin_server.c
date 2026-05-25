@@ -6,12 +6,14 @@
 
 #include "esp_log.h"
 #include "esp_http_server.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 
 #include "mbedtls/md.h"
 #include "mbedtls/pk.h"
 #include "mbedtls/platform_util.h"
+#include "psa/crypto.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -491,7 +493,12 @@ static esp_err_t validate_issuer_public_key_pem(const char *pem)
         strlen(pem) + 1
     );
 
-    if (rc == 0 && !mbedtls_pk_can_do(&pk, MBEDTLS_PK_ECDSA)) {
+    if (rc == 0 &&
+        !mbedtls_pk_can_do_psa(
+            &pk,
+            PSA_ALG_ECDSA(PSA_ALG_SHA_256),
+            PSA_KEY_USAGE_VERIFY_HASH
+        )) {
         rc = -1;
     }
 

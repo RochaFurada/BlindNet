@@ -11,4 +11,6 @@ idf_component_register(
         log
         mbedtls
         membrane
+    PRIV_REQUIRES
+        esp_hw_support
 )

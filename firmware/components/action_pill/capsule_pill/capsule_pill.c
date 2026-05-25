@@ -5,6 +5,7 @@
 #include "mbedtls/md.h"
 #include "mbedtls/platform_util.h"
 #include "mbedtls/pk.h"
+#include "psa/crypto.h"
 
 static void update_u8(mbedtls_md_context_t *ctx, uint8_t value)
 {
@@ -327,7 +328,12 @@ bool capsule_pill_verify_asymmetric(
     mbedtls_pk_init(&pk);
 
     int rc = mbedtls_pk_parse_public_key(&pk, public_key, public_key_len);
-    if (rc == 0 && !mbedtls_pk_can_do(&pk, MBEDTLS_PK_ECDSA)) {
+    if (rc == 0 &&
+        !mbedtls_pk_can_do_psa(
+            &pk,
+            PSA_ALG_ECDSA(PSA_ALG_SHA_256),
+            PSA_KEY_USAGE_VERIFY_HASH
+        )) {
         rc = -1;
     }
     if (rc == 0) {

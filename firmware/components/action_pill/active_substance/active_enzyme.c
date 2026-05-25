@@ -3,9 +3,8 @@
 #include <stdbool.h>
 #include <string.h>
 
-#include "mbedtls/gcm.h"
-#include "mbedtls/md.h"
 #include "mbedtls/platform_util.h"
+#include "psa/crypto.h"
 
 #define ACTIVE_ENZYME_HKDF_DIGEST_LEN 32
 
@@ -61,6 +60,68 @@ static esp_err_t select_key_len(
     }
 }
 
+static esp_err_t hmac_sha256(
+    const uint8_t *key,
+    size_t key_len,
+    const uint8_t *part1,
+    size_t part1_len,
+    const uint8_t *part2,
+    size_t part2_len,
+    uint8_t out[ACTIVE_ENZYME_HKDF_DIGEST_LEN]
+)
+{
+    if (!key || key_len == 0 || !out ||
+        (!part1 && part1_len != 0) ||
+        (!part2 && part2_len != 0)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    psa_status_t status = psa_crypto_init();
+    if (status != PSA_SUCCESS) {
+        return ESP_FAIL;
+    }
+
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_MESSAGE);
+    psa_set_key_algorithm(&attributes, PSA_ALG_HMAC(PSA_ALG_SHA_256));
+    psa_set_key_type(&attributes, PSA_KEY_TYPE_HMAC);
+    psa_set_key_bits(&attributes, key_len * 8u);
+
+    mbedtls_svc_key_id_t key_id = MBEDTLS_SVC_KEY_ID_INIT;
+    status = psa_import_key(&attributes, key, key_len, &key_id);
+    psa_reset_key_attributes(&attributes);
+
+    psa_mac_operation_t op = PSA_MAC_OPERATION_INIT;
+    size_t mac_len = 0;
+
+    if (status == PSA_SUCCESS) {
+        status = psa_mac_sign_setup(&op, key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256));
+    }
+    if (status == PSA_SUCCESS && part1_len != 0) {
+        status = psa_mac_update(&op, part1, part1_len);
+    }
+    if (status == PSA_SUCCESS && part2_len != 0) {
+        status = psa_mac_update(&op, part2, part2_len);
+    }
+    if (status == PSA_SUCCESS) {
+        status = psa_mac_sign_finish(
+            &op,
+            out,
+            ACTIVE_ENZYME_HKDF_DIGEST_LEN,
+            &mac_len
+        );
+    }
+
+    (void)psa_mac_abort(&op);
+    if (!mbedtls_svc_key_id_is_null(key_id)) {
+        (void)psa_destroy_key(key_id);
+    }
+
+    return status == PSA_SUCCESS && mac_len == ACTIVE_ENZYME_HKDF_DIGEST_LEN
+        ? ESP_OK
+        : ESP_FAIL;
+}
+
 static esp_err_t hkdf_sha256_one_block(
     const uint8_t *ikm,
     size_t ikm_len,
@@ -78,48 +139,26 @@ static esp_err_t hkdf_sha256_one_block(
         return ESP_ERR_INVALID_ARG;
     }
 
-    const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    if (!md_info) {
-        return ESP_FAIL;
-    }
-
     uint8_t prk[ACTIVE_ENZYME_HKDF_DIGEST_LEN] = {0};
     uint8_t t1[ACTIVE_ENZYME_HKDF_DIGEST_LEN] = {0};
     const uint8_t counter = 1;
 
-    int rc = mbedtls_md_hmac(md_info, salt, salt_len, ikm, ikm_len, prk);
-    if (rc != 0) {
+    esp_err_t err = hmac_sha256(salt, salt_len, ikm, ikm_len, NULL, 0, prk);
+    if (err != ESP_OK) {
         mbedtls_platform_zeroize(prk, sizeof(prk));
-        return ESP_FAIL;
+        return err;
     }
 
-    mbedtls_md_context_t ctx;
-    mbedtls_md_init(&ctx);
+    err = hmac_sha256(prk, sizeof(prk), info, info_len, &counter, sizeof(counter), t1);
 
-    rc = mbedtls_md_setup(&ctx, md_info, 1);
-    if (rc == 0) {
-        rc = mbedtls_md_hmac_starts(&ctx, prk, sizeof(prk));
-    }
-    if (rc == 0) {
-        rc = mbedtls_md_hmac_update(&ctx, info, info_len);
-    }
-    if (rc == 0) {
-        rc = mbedtls_md_hmac_update(&ctx, &counter, sizeof(counter));
-    }
-    if (rc == 0) {
-        rc = mbedtls_md_hmac_finish(&ctx, t1);
-    }
-
-    mbedtls_md_free(&ctx);
-
-    if (rc == 0) {
+    if (err == ESP_OK) {
         memcpy(out_key, t1, out_key_len);
     }
 
     mbedtls_platform_zeroize(prk, sizeof(prk));
     mbedtls_platform_zeroize(t1, sizeof(t1));
 
-    return rc == 0 ? ESP_OK : ESP_FAIL;
+    return err;
 }
 
 static esp_err_t derive_aead_key(
@@ -197,42 +236,59 @@ static esp_err_t decrypt_aes_gcm(
         return ESP_ERR_INVALID_ARG;
     }
 
-    mbedtls_gcm_context ctx;
-    mbedtls_gcm_init(&ctx);
+    uint8_t sealed[
+        ACTIVE_SUBSTANCE_CIPHERTEXT_MAX_LEN + ACTIVE_SUBSTANCE_TAG_LEN
+    ] = {0};
+    const size_t sealed_len = substance->ciphertext_len + ACTIVE_SUBSTANCE_TAG_LEN;
 
-    int rc = mbedtls_gcm_setkey(
-        &ctx,
-        MBEDTLS_CIPHER_ID_AES,
-        key,
-        (unsigned int)(key_len * 8u)
-    );
+    memcpy(sealed, substance->ciphertext, substance->ciphertext_len);
+    memcpy(&sealed[substance->ciphertext_len], substance->tag, ACTIVE_SUBSTANCE_TAG_LEN);
 
-    if (rc == 0) {
-        rc = mbedtls_gcm_auth_decrypt(
-            &ctx,
-            substance->ciphertext_len,
+    psa_status_t status = psa_crypto_init();
+    if (status != PSA_SUCCESS) {
+        mbedtls_platform_zeroize(sealed, sizeof(sealed));
+        return ESP_FAIL;
+    }
+
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attributes, key_len * 8u);
+    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_DECRYPT);
+    psa_set_key_algorithm(&attributes, PSA_ALG_GCM);
+
+    mbedtls_svc_key_id_t key_id = MBEDTLS_SVC_KEY_ID_INIT;
+    status = psa_import_key(&attributes, key, key_len, &key_id);
+    psa_reset_key_attributes(&attributes);
+
+    size_t plaintext_len = 0;
+    if (status == PSA_SUCCESS) {
+        status = psa_aead_decrypt(
+            key_id,
+            PSA_ALG_GCM,
             substance->nonce,
             ACTIVE_SUBSTANCE_NONCE_LEN,
             aad,
             aad_len,
-            substance->tag,
-            ACTIVE_SUBSTANCE_TAG_LEN,
-            substance->ciphertext,
-            out_plaintext
+            sealed,
+            sealed_len,
+            out_plaintext,
+            substance->ciphertext_len,
+            &plaintext_len
         );
     }
 
-    mbedtls_gcm_free(&ctx);
+    if (!mbedtls_svc_key_id_is_null(key_id)) {
+        (void)psa_destroy_key(key_id);
+    }
+    mbedtls_platform_zeroize(sealed, sizeof(sealed));
 
-    if (rc == 0) {
+    if (status == PSA_SUCCESS && plaintext_len == substance->ciphertext_len) {
         return ESP_OK;
     }
 
-#ifdef MBEDTLS_ERR_GCM_AUTH_FAILED
-    if (rc == MBEDTLS_ERR_GCM_AUTH_FAILED) {
+    if (status == PSA_ERROR_INVALID_SIGNATURE) {
         return ESP_ERR_INVALID_STATE;
     }
-#endif
 
     return ESP_FAIL;
 }
