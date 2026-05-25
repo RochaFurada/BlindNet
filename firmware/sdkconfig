@@ -788,7 +788,7 @@ CONFIG_COMPILER_CXX_GLIBCXX_CONSTEXPR_NO_CHANGE=y
 # Bluetooth
 #
 # default:
-# CONFIG_BT_ENABLED is not set
+CONFIG_BT_ENABLED=y
 
 #
 # Common Options
@@ -798,7 +798,7 @@ CONFIG_COMPILER_CXX_GLIBCXX_CONSTEXPR_NO_CHANGE=y
 # BLE Log
 #
 # default:
-# CONFIG_BLE_LOG_ENABLED is not set
+CONFIG_BLE_LOG_ENABLED=y
 # end of BLE Log
 
 # default:

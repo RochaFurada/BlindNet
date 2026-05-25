@@ -17,8 +17,8 @@ use crate::platform::rate_limiter::{RateLimitParamsRaw, RateLimitRuleRaw, RateLi
 use crate::platform::wifi_manager::WifiManagerConfigRaw;
 use crate::platform::{
     admin_server, config, device_registry, dns_filter, event_bus, flow_table, mqtt_broker,
-    policy_engine, quarantine_manager, rate_limiter, setup_ap, swarm_agent, telemetry_agent,
-    wifi_manager, zone_firewall, zone_gateway, Result,
+    policy_engine, quarantine_manager, rate_limiter, setup_ap, setup_button, swarm_agent,
+    telemetry_agent, wifi_manager, zone_firewall, zone_gateway, Result,
 };
 
 use crate::logic::g2g;
@@ -26,6 +26,10 @@ use crate::logic::g2g;
 const SETUP_SSID: &[u8] = b"ZoneGuard_Setup\0";
 const SETUP_PASSWORD: &[u8] = b"setup1234\0";
 const DEFAULT_SWARM_BROADCAST: &[u8] = b"255.255.255.255\0";
+const ADMIN_SETUP_BUTTON_GPIO: i32 = setup_button::SETUP_BUTTON_DEFAULT_GPIO;
+const ADMIN_SETUP_HOLD_MS: u32 = setup_button::SETUP_BUTTON_DEFAULT_HOLD_MS;
+const ADMIN_SETUP_POLL_MS: u32 = setup_button::SETUP_BUTTON_DEFAULT_POLL_MS;
+const ADMIN_SETUP_UNLOCK_WINDOW_MS: u32 = 30_000;
 
 const SWARM_FRAME_PAYLOAD_OFFSET: usize =
     2 + 1 + 1 + 4 + 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + swarm_agent::SWARM_AGENT_HMAC_LEN;
@@ -63,6 +67,9 @@ fn enter_setup_mode() -> Result {
         let admin_config = AdminServerConfigRaw {
             setup_ap_ssid: cstr_ptr(SETUP_SSID),
             setup_ap_password: cstr_ptr(SETUP_PASSWORD),
+            mode: admin_server::ADMIN_SERVER_MODE_BOOTSTRAP,
+            guardian_id: 0,
+            zone_id: 0,
         };
 
         admin_server::start(&admin_config)
@@ -161,6 +168,8 @@ fn enter_normal_mode(cfg: &ZoneguardConfigRaw) -> Result {
         let _ = mqtt_broker::start(Some(&mqtt_config));
     }
 
+    start_admin_setup_button()?;
+
     g2g::start(cfg.guardian_id, cfg.zone_id)?;
 
     let swarm_broadcast = if cfg.swarm_broadcast[0] != 0 {
@@ -210,6 +219,19 @@ fn init_and_start_dns(dns_config: &DnsFilterConfigRaw) -> Result {
     dns_filter::init(Some(dns_config))?;
     add_initial_dns_rules()?;
     dns_filter::start()
+}
+
+fn start_admin_setup_button() -> Result {
+    let config = setup_button::SetupButtonConfigRaw {
+        gpio_num: ADMIN_SETUP_BUTTON_GPIO,
+        active_low: true,
+        hold_ms: ADMIN_SETUP_HOLD_MS,
+        poll_ms: ADMIN_SETUP_POLL_MS,
+        on_hold: Some(on_admin_setup_button_hold),
+        ctx: ptr::null_mut(),
+    };
+
+    unsafe { setup_button::start(Some(&config)) }
 }
 
 fn add_initial_policies() -> Result {
@@ -342,6 +364,10 @@ fn test_zone_firewall_fake_flow() -> Result {
         80,
         &mut decision,
     )
+}
+
+unsafe extern "C" fn on_admin_setup_button_hold(_ctx: *mut c_void) {
+    let _ = admin_server::open_window(None, ADMIN_SETUP_UNLOCK_WINDOW_MS);
 }
 
 // Retirar depdedência C direta

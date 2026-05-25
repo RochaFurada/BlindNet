@@ -18,5 +18,6 @@ idf_component_register(
         swarm_agent
         telemetry_agent
         admin_server
+        setup_button
         cortex
 )

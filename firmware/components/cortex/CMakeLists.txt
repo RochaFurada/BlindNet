@@ -17,6 +17,7 @@ idf_component_register(
         quarantine_manager
         rate_limiter
         setup_ap
+        setup_button
         stomach
         swarm_agent
         telemetry_agent

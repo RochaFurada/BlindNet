@@ -5,8 +5,10 @@ idf_component_register(
         esp_common
         esp_http_server
         esp_system
+        esp_timer
         freertos
         config_store
         log
         mbedtls
+        membrane
 )

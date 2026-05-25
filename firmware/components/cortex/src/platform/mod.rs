@@ -33,6 +33,7 @@ pub mod ribosome_store;
 pub mod ribosome_table;
 pub mod rna_membrane;
 pub mod setup_ap;
+pub mod setup_button;
 pub mod stomach_cp_cache;
 pub mod swarm_agent;
 pub mod telemetry_agent;
