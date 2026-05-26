@@ -1,9 +1,10 @@
-use core::ffi::{c_char, c_void};
+use core::ffi::{c_char, c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
 
 use crate::platform;
 use crate::platform::admin_server::AdminServerConfigRaw;
+use crate::platform::capsule_pill::CAPSULE_PILL_ISSUER_KEY_ID_LEN;
 use crate::platform::config::ZoneguardConfigRaw;
 use crate::platform::dns_filter::{DnsFilterConfigRaw, DnsFilterRuleRaw};
 use crate::platform::event_bus::ZgEventRaw;
@@ -21,15 +22,33 @@ use crate::platform::{
     zone_firewall, zone_gateway, Result,
 };
 
+use crate::ffi::config_store::CONFIG_STORE_PUBLIC_KEY_MAX_LEN;
+use crate::logic::action_pill::ActionPill;
+use crate::logic::broker::BrokerPipeline;
 use crate::logic::g2g;
+use crate::logic::membrane::Membrane;
+use crate::logic::stomach::{self, DigestedActiveSubstance, Stomach};
 
 const SETUP_SSID: &[u8] = b"ZoneGuard_Setup\0";
 const SETUP_PASSWORD: &[u8] = b"setup1234\0";
+const MAINTENANCE_SSID: &[u8] = b"ZoneGuard_Admin\0";
+const MAINTENANCE_PASSWORD: &[u8] = b"\0";
 const ADMIN_SETUP_BUTTON_GPIO: i32 = setup_button::SETUP_BUTTON_DEFAULT_GPIO;
 const ADMIN_SETUP_HOLD_MS: u32 = setup_button::SETUP_BUTTON_DEFAULT_HOLD_MS;
 const ADMIN_SETUP_POLL_MS: u32 = setup_button::SETUP_BUTTON_DEFAULT_POLL_MS;
-const ADMIN_SETUP_UNLOCK_WINDOW_MS: u32 = 30_000;
+const ADMIN_SETUP_UNLOCK_WINDOW_MS: u32 = 180_000;
+const ESP_LOG_WARN: c_int = 2;
+const ESP_LOG_INFO: c_int = 3;
+const TAG_PIPELINE: &[u8] = b"cortex_pipeline\0";
 
+static mut ACTION_PIPELINE: Option<ActionPipeline> = None;
+static mut ADMIN_WINDOW_ACTIVE: bool = false;
+static mut ADMIN_WINDOW_HAS_CLIENT: bool = false;
+
+unsafe extern "C" {
+    fn esp_timer_get_time() -> i64;
+    fn esp_log_write(level: c_int, tag: *const c_char, format: *const c_char, ...);
+}
 
 pub fn run_code() -> platform::EspErr {
     match run() {
@@ -52,6 +71,74 @@ pub fn run() -> Result {
     enter_normal_mode(&cfg)
 }
 
+struct ActionPipeline {
+    stomach: Stomach,
+    membrane: Membrane,
+    issuer_key_id: [u8; CAPSULE_PILL_ISSUER_KEY_ID_LEN],
+    issuer_public_key_pem: [u8; CONFIG_STORE_PUBLIC_KEY_MAX_LEN],
+    issuer_public_key_len: usize,
+}
+
+impl ActionPipeline {
+    fn new(cfg: &ZoneguardConfigRaw) -> Result<Self> {
+        let mut membrane = Membrane::new();
+        membrane.init()?;
+
+        let issuer_public_key_len = c_char_nul_len(&cfg.issuer_public_key_pem);
+        if issuer_public_key_len == 0 {
+            return Err(platform::ESP_ERR_INVALID_ARG);
+        }
+
+        let mut issuer_public_key_pem = [0u8; CONFIG_STORE_PUBLIC_KEY_MAX_LEN];
+        copy_c_char_to_u8(&mut issuer_public_key_pem, &cfg.issuer_public_key_pem);
+
+        Ok(Self {
+            stomach: Stomach::new(),
+            membrane,
+            issuer_key_id: cfg.issuer_key_id,
+            issuer_public_key_pem,
+            issuer_public_key_len,
+        })
+    }
+
+    fn process_action_pill(&mut self, pill: ActionPill) -> Result {
+        log_pipeline_action_pill_rx();
+        let seen = self.stomach.seen_or_add_cp(&pill);
+        if seen.status != platform::ESP_OK {
+            return Err(seen.status);
+        }
+        if seen.seen {
+            return Ok(());
+        }
+
+        self.stomach.validate_authorized(
+            &pill,
+            now_ms(),
+            &self.issuer_key_id,
+            self.issuer_public_key(),
+        )?;
+
+        let mut digested = DigestedActiveSubstance::new();
+        stomach::digest_active_substance(
+            &pill,
+            &self.membrane.state().ribosome_table,
+            None,
+            &mut digested,
+        )?;
+
+        let result = BrokerPipeline::publish_digested(&self.membrane, &digested);
+        log_pipeline_result(match result {
+            Ok(()) => platform::ESP_OK,
+            Err(err) => err,
+        });
+        result
+    }
+
+    fn issuer_public_key(&self) -> &[u8] {
+        &self.issuer_public_key_pem[..self.issuer_public_key_len]
+    }
+}
+
 fn enter_setup_mode() -> Result {
     unsafe {
         setup_ap::start(cstr_ptr(SETUP_SSID), cstr_ptr(SETUP_PASSWORD))?;
@@ -62,6 +149,8 @@ fn enter_setup_mode() -> Result {
             mode: admin_server::ADMIN_SERVER_MODE_BOOTSTRAP,
             guardian_id: 0,
             zone_id: 0,
+            on_window_closed: None,
+            ctx: ptr::null_mut(),
         };
 
         admin_server::start(&admin_config)
@@ -160,10 +249,21 @@ fn enter_normal_mode(cfg: &ZoneguardConfigRaw) -> Result {
         let _ = mqtt_broker::start(Some(&mqtt_config));
     }
 
+    init_action_pipeline(cfg)?;
+
     start_admin_setup_button()?;
 
+    g2g::set_action_pill_handler(Some(on_action_pill_received));
     g2g::start(cfg.guardian_id, cfg.zone_id)?;
 
+    Ok(())
+}
+
+fn init_action_pipeline(cfg: &ZoneguardConfigRaw) -> Result {
+    let pipeline = ActionPipeline::new(cfg)?;
+    unsafe {
+        ACTION_PIPELINE = Some(pipeline);
+    }
     Ok(())
 }
 
@@ -319,7 +419,64 @@ fn test_zone_firewall_fake_flow() -> Result {
 }
 
 unsafe extern "C" fn on_admin_setup_button_hold(_ctx: *mut c_void) {
-    let _ = admin_server::open_window(None, ADMIN_SETUP_UNLOCK_WINDOW_MS);
+    unsafe {
+        if ADMIN_WINDOW_ACTIVE {
+            return;
+        }
+        ADMIN_WINDOW_ACTIVE = true;
+        ADMIN_WINDOW_HAS_CLIENT = false;
+    }
+
+    if unsafe {
+        wifi_manager::switch_to_ap(
+            cstr_ptr(MAINTENANCE_SSID),
+            cstr_ptr(MAINTENANCE_PASSWORD),
+            1,
+        )
+    }
+    .is_err()
+    {
+        unsafe {
+            ADMIN_WINDOW_ACTIVE = false;
+            ADMIN_WINDOW_HAS_CLIENT = false;
+        }
+        return;
+    }
+
+    let admin_config = AdminServerConfigRaw {
+        setup_ap_ssid: cstr_ptr(MAINTENANCE_SSID),
+        setup_ap_password: cstr_ptr(MAINTENANCE_PASSWORD),
+        mode: admin_server::ADMIN_SERVER_MODE_MAINTENANCE,
+        guardian_id: 0,
+        zone_id: 0,
+        on_window_closed: Some(on_admin_window_closed),
+        ctx: ptr::null_mut(),
+    };
+
+    if admin_server::open_window(Some(&admin_config), ADMIN_SETUP_UNLOCK_WINDOW_MS).is_err() {
+        unsafe {
+            ADMIN_WINDOW_ACTIVE = false;
+            ADMIN_WINDOW_HAS_CLIENT = false;
+        }
+        let _ = wifi_manager::restore_normal();
+    }
+}
+
+unsafe extern "C" fn on_admin_window_closed(_ctx: *mut c_void) {
+    ADMIN_WINDOW_ACTIVE = false;
+    ADMIN_WINDOW_HAS_CLIENT = false;
+    let _ = wifi_manager::restore_normal();
+}
+
+fn on_action_pill_received(pill: &ActionPill) -> Result {
+    let pill_copy = *pill;
+    unsafe {
+        let pipeline = ptr::addr_of_mut!(ACTION_PIPELINE);
+        match (*pipeline).as_mut() {
+            Some(pipeline) => pipeline.process_action_pill(pill_copy),
+            None => Err(platform::ESP_ERR_INVALID_STATE),
+        }
+    }
 }
 
 // Retirar depdedência C direta
@@ -333,7 +490,26 @@ unsafe extern "C" fn on_mqtt_connect(
 }
 
 // Retirar depdedência C direta
-unsafe extern "C" fn on_event(_event: *const ZgEventRaw, _ctx: *mut c_void) {}
+unsafe extern "C" fn on_event(event: *const ZgEventRaw, _ctx: *mut c_void) {
+    if event.is_null() {
+        return;
+    }
+
+    let event = &*event;
+    match event.event_type {
+        event_bus::ZG_EVENT_AP_CLIENT_JOINED => {
+            if ADMIN_WINDOW_ACTIVE {
+                ADMIN_WINDOW_HAS_CLIENT = true;
+            }
+        }
+        event_bus::ZG_EVENT_AP_CLIENT_LEFT => {
+            if ADMIN_WINDOW_ACTIVE && ADMIN_WINDOW_HAS_CLIENT {
+                let _ = admin_server::stop();
+            }
+        }
+        _ => {}
+    }
+}
 
 fn cstr_ptr(bytes: &'static [u8]) -> *const c_char {
     bytes.as_ptr().cast()
@@ -368,7 +544,60 @@ fn write_cstr(dst: &mut [c_char], src: &[u8]) {
     dst[limit] = 0;
 }
 
+fn c_char_nul_len(src: &[c_char]) -> usize {
+    if src.is_empty() || src[0] == 0 {
+        return 0;
+    }
+
+    for i in 0..src.len() {
+        if src[i] == 0 {
+            return i + 1;
+        }
+    }
+
+    src.len()
+}
+
+fn now_ms() -> u32 {
+    let us = unsafe { esp_timer_get_time() };
+    if us <= 0 {
+        0
+    } else {
+        ((us as u64) / 1_000) as u32
+    }
+}
+
 fn zeroed_raw<T>() -> T {
     let raw = MaybeUninit::<T>::zeroed();
     unsafe { raw.assume_init() }
+}
+
+fn log_pipeline_tag() -> *const c_char {
+    TAG_PIPELINE.as_ptr().cast()
+}
+
+fn log_pipeline_action_pill_rx() {
+    unsafe {
+        esp_log_write(
+            ESP_LOG_INFO,
+            log_pipeline_tag(),
+            c"action_pill received by conscience".as_ptr(),
+        );
+    }
+}
+
+fn log_pipeline_result(err: platform::EspErr) {
+    let level = if err == platform::ESP_OK {
+        ESP_LOG_INFO
+    } else {
+        ESP_LOG_WARN
+    };
+    unsafe {
+        esp_log_write(
+            level,
+            log_pipeline_tag(),
+            c"publish digested result err=0x%08x".as_ptr(),
+            err as u32,
+        );
+    }
 }

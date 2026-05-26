@@ -1,3 +1,5 @@
+use core::ffi::{c_char, c_int};
+
 use zeroize::Zeroize;
 
 use crate::platform;
@@ -15,6 +17,13 @@ use super::action_pill::{self, ActionPill};
 const _: () = assert!(stomach_cp_cache::STOMACH_CP_CACHE_SIZE > 0);
 const _: () =
     assert!(stomach_cp_cache::STOMACH_CP_DIGEST_LEN == action_pill::ACTION_PILL_INNER_ID_LEN);
+const ESP_LOG_WARN: c_int = 2;
+const ESP_LOG_INFO: c_int = 3;
+const TAG_STOMACH: &[u8] = b"cortex_stomach\0";
+
+unsafe extern "C" {
+    fn esp_log_write(level: c_int, tag: *const c_char, format: *const c_char, ...);
+}
 
 #[repr(C)]
 pub struct StomachSeenResult {
@@ -86,14 +95,9 @@ pub struct CapsuleVerifier;
 impl CapsuleVerifier {
     pub fn verify(
         pill: &ActionPill,
-        expected_network_id: &[u8; capsule_pill::CAPSULE_PILL_NETWORK_ID_LEN],
         expected_issuer_key_id: &[u8; capsule_pill::CAPSULE_PILL_ISSUER_KEY_ID_LEN],
         issuer_public_key: &[u8],
     ) -> bool {
-        if !action_pill::network_id_matches(pill, expected_network_id) {
-            return false;
-        }
-
         if !action_pill::issuer_key_matches(pill, expected_issuer_key_id) {
             return false;
         }
@@ -116,22 +120,33 @@ impl CapsuleDigester {
         out_result: &mut DigestedActiveSubstance,
     ) -> Result {
         out_result.clear();
+        log_digest_start(
+            devices.count,
+            pill.active.cipher,
+            pill.active.ciphertext_len,
+        );
 
         if !table_count_valid(devices) {
+            log_digest_result(platform::ESP_ERR_INVALID_ARG);
             return Err(platform::ESP_ERR_INVALID_ARG);
         }
 
-        active_substance::validate_envelope(&pill.active)?;
+        if let Err(err) = active_substance::validate_envelope(&pill.active) {
+            log_digest_result(err);
+            return Err(err);
+        }
 
         if devices.count == 0 {
+            log_digest_result(platform::ESP_ERR_NOT_FOUND);
             return Err(platform::ESP_ERR_NOT_FOUND);
         }
 
-        for candidate in devices.entries.iter().take(devices.count) {
+        for (index, candidate) in devices.entries.iter().take(devices.count).enumerate() {
             if !device_secret_valid(&candidate.device_secret) {
                 continue;
             }
 
+            log_candidate(index, candidate.epoch);
             let mut plaintext = [0u8; active_enzyme::ACTIVE_ENZYME_PLAINTEXT_MAX_LEN];
             let mut plaintext_len = 0;
             match active_enzyme::decrypt_with_secret(
@@ -148,9 +163,16 @@ impl CapsuleDigester {
                         &mut out_result.command,
                     );
                     plaintext.zeroize();
-                    parse_result?;
+                    if let Err(err) = parse_result {
+                        log_candidate_result(index, err);
+                        log_digest_result(err);
+                        return Err(err);
+                    }
 
                     out_result.device = *candidate;
+                    log_candidate_result(index, platform::ESP_OK);
+                    log_digest_ok(index, out_result.command.amino_id as u32);
+                    log_digest_result(platform::ESP_OK);
                     return Ok(());
                 }
                 Err(err)
@@ -159,16 +181,20 @@ impl CapsuleDigester {
                         || err == platform::ESP_ERR_INVALID_ARG =>
                 {
                     plaintext.zeroize();
+                    log_candidate_result(index, err);
+                    log_digest_result(err);
                     return Err(err);
                 }
                 Err(_) => {
                     plaintext.zeroize();
+                    log_candidate_result(index, platform::ESP_ERR_NOT_FOUND);
                     continue;
                 }
             }
         }
 
         out_result.clear();
+        log_digest_result(platform::ESP_ERR_NOT_FOUND);
         Err(platform::ESP_ERR_NOT_FOUND)
     }
 }
@@ -196,10 +222,12 @@ impl Stomach {
                 result.status = platform::ESP_OK;
                 result.seen = self.cp_cache.seen_or_add(&digest);
                 result.digest = digest;
+                log_seen(result.status, result.seen, &result.digest);
             }
             Err(err) => {
                 result.status = err;
                 result.seen = false;
+                log_seen(result.status, result.seen, &result.digest);
             }
         }
 
@@ -214,17 +242,16 @@ impl Stomach {
         &self,
         pill: &ActionPill,
         now_ms: u32,
-        expected_network_id: &[u8; capsule_pill::CAPSULE_PILL_NETWORK_ID_LEN],
         expected_issuer_key_id: &[u8; capsule_pill::CAPSULE_PILL_ISSUER_KEY_ID_LEN],
         issuer_public_key: &[u8],
     ) -> Result {
-        action_pill::validate_authorized(
-            pill,
-            now_ms,
-            expected_network_id,
-            expected_issuer_key_id,
-            issuer_public_key,
-        )
+        let result =
+            validate_authorized_with_trace(pill, now_ms, expected_issuer_key_id, issuer_public_key);
+        log_authorized_result(match result {
+            Ok(()) => platform::ESP_OK,
+            Err(err) => err,
+        });
+        result
     }
 
     pub fn seen_cache(&self) -> &StomachCpCache {
@@ -244,16 +271,10 @@ pub fn ap_validate(pill: &ActionPill, now_ms: u32) -> Result {
 
 pub fn capsule_verify(
     pill: &ActionPill,
-    expected_network_id: &[u8; capsule_pill::CAPSULE_PILL_NETWORK_ID_LEN],
     expected_issuer_key_id: &[u8; capsule_pill::CAPSULE_PILL_ISSUER_KEY_ID_LEN],
     issuer_public_key: &[u8],
 ) -> bool {
-    CapsuleVerifier::verify(
-        pill,
-        expected_network_id,
-        expected_issuer_key_id,
-        issuer_public_key,
-    )
+    CapsuleVerifier::verify(pill, expected_issuer_key_id, issuer_public_key)
 }
 
 pub fn digest_active_substance(
@@ -283,5 +304,199 @@ fn empty_ribosome_entry() -> RibosomeTableEntryRaw {
         template_id: 0,
         epoch: 0,
         device_secret: [0u8; ribosome_table::RIBOSOME_DEVICE_SECRET_LEN],
+    }
+}
+
+fn log_tag() -> *const c_char {
+    TAG_STOMACH.as_ptr().cast()
+}
+
+fn digest_prefix(digest: &[u8; action_pill::ACTION_PILL_INNER_ID_LEN]) -> u32 {
+    u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])
+}
+
+fn log_seen(
+    status: platform::EspErr,
+    seen: bool,
+    digest: &[u8; action_pill::ACTION_PILL_INNER_ID_LEN],
+) {
+    unsafe {
+        esp_log_write(
+            ESP_LOG_INFO,
+            log_tag(),
+            c"cp cache status=0x%08x seen=%u digest=%08x".as_ptr(),
+            status as u32,
+            if seen { 1u32 } else { 0u32 },
+            digest_prefix(digest),
+        );
+    }
+}
+
+fn log_authorized_result(err: platform::EspErr) {
+    let level = if err == platform::ESP_OK {
+        ESP_LOG_INFO
+    } else {
+        ESP_LOG_WARN
+    };
+    unsafe {
+        esp_log_write(
+            level,
+            log_tag(),
+            c"capsule authorized err=0x%08x".as_ptr(),
+            err as u32,
+        );
+    }
+}
+
+fn validate_authorized_with_trace(
+    pill: &ActionPill,
+    now_ms: u32,
+    expected_issuer_key_id: &[u8; capsule_pill::CAPSULE_PILL_ISSUER_KEY_ID_LEN],
+    issuer_public_key: &[u8],
+) -> Result {
+    action_pill::precheck_for_relay(pill, now_ms)?;
+
+    if !action_pill::issuer_key_matches(pill, expected_issuer_key_id) {
+        log_auth_bytes(
+            c"issuer_key_id mismatch".as_ptr(),
+            &pill.capsule.issuer_key_id,
+            expected_issuer_key_id,
+        );
+        return Err(platform::ESP_ERR_INVALID_STATE);
+    }
+
+    if !action_pill::capsule_matches_active(pill) {
+        log_auth_reason(c"active_hash mismatch".as_ptr());
+        return Err(platform::ESP_ERR_INVALID_CRC);
+    }
+
+    if !action_pill::verify_capsule_signature(pill, issuer_public_key) {
+        log_auth_reason(c"signature invalid".as_ptr());
+        return Err(platform::ESP_ERR_INVALID_STATE);
+    }
+
+    Ok(())
+}
+
+fn log_auth_reason(reason: *const c_char) {
+    unsafe {
+        esp_log_write(ESP_LOG_WARN, log_tag(), c"auth fail: %s".as_ptr(), reason);
+    }
+}
+
+fn log_auth_bytes(reason: *const c_char, got: &[u8], expected: &[u8]) {
+    unsafe {
+        esp_log_write(
+            ESP_LOG_WARN,
+            log_tag(),
+            c"auth fail: %s got=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x expected=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x".as_ptr(),
+            reason,
+            byte_at(got, 0),
+            byte_at(got, 1),
+            byte_at(got, 2),
+            byte_at(got, 3),
+            byte_at(got, 4),
+            byte_at(got, 5),
+            byte_at(got, 6),
+            byte_at(got, 7),
+            byte_at(got, 8),
+            byte_at(got, 9),
+            byte_at(got, 10),
+            byte_at(got, 11),
+            byte_at(got, 12),
+            byte_at(got, 13),
+            byte_at(got, 14),
+            byte_at(got, 15),
+            byte_at(expected, 0),
+            byte_at(expected, 1),
+            byte_at(expected, 2),
+            byte_at(expected, 3),
+            byte_at(expected, 4),
+            byte_at(expected, 5),
+            byte_at(expected, 6),
+            byte_at(expected, 7),
+            byte_at(expected, 8),
+            byte_at(expected, 9),
+            byte_at(expected, 10),
+            byte_at(expected, 11),
+            byte_at(expected, 12),
+            byte_at(expected, 13),
+            byte_at(expected, 14),
+            byte_at(expected, 15),
+        );
+    }
+}
+
+fn byte_at(bytes: &[u8], index: usize) -> u32 {
+    bytes.get(index).copied().unwrap_or(0) as u32
+}
+
+fn log_digest_start(device_count: usize, cipher: u8, ciphertext_len: u16) {
+    unsafe {
+        esp_log_write(
+            ESP_LOG_INFO,
+            log_tag(),
+            c"digest start devices=%u cipher=%u ciphertext_len=%u".as_ptr(),
+            device_count as u32,
+            cipher as u32,
+            ciphertext_len as u32,
+        );
+    }
+}
+
+fn log_candidate(index: usize, epoch: u32) {
+    unsafe {
+        esp_log_write(
+            ESP_LOG_INFO,
+            log_tag(),
+            c"try ribosome index=%u epoch=%u".as_ptr(),
+            index as u32,
+            epoch,
+        );
+    }
+}
+
+fn log_candidate_result(index: usize, err: platform::EspErr) {
+    let level = if err == platform::ESP_OK {
+        ESP_LOG_INFO
+    } else {
+        ESP_LOG_WARN
+    };
+    unsafe {
+        esp_log_write(
+            level,
+            log_tag(),
+            c"ribosome index=%u err=0x%08x".as_ptr(),
+            index as u32,
+            err as u32,
+        );
+    }
+}
+
+fn log_digest_ok(index: usize, amino_id: u32) {
+    unsafe {
+        esp_log_write(
+            ESP_LOG_INFO,
+            log_tag(),
+            c"digest ok ribosome=%u amino=%u".as_ptr(),
+            index as u32,
+            amino_id,
+        );
+    }
+}
+
+fn log_digest_result(err: platform::EspErr) {
+    let level = if err == platform::ESP_OK {
+        ESP_LOG_INFO
+    } else {
+        ESP_LOG_WARN
+    };
+    unsafe {
+        esp_log_write(
+            level,
+            log_tag(),
+            c"digest result err=0x%08x".as_ptr(),
+            err as u32,
+        );
     }
 }

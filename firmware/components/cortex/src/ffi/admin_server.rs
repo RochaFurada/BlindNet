@@ -1,4 +1,4 @@
-use core::ffi::c_char;
+use core::ffi::{c_char, c_void};
 
 use crate::ffi::EspErr;
 
@@ -14,6 +14,8 @@ pub struct AdminServerConfigRaw {
     pub mode: AdminServerMode,
     pub guardian_id: u32,
     pub zone_id: u32,
+    pub on_window_closed: Option<unsafe extern "C" fn(ctx: *mut c_void)>,
+    pub ctx: *mut c_void,
 }
 
 unsafe extern "C" {

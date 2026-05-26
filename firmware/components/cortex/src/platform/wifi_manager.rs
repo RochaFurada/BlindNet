@@ -1,3 +1,5 @@
+use core::ffi::c_char;
+
 use crate::ffi::wifi_manager;
 use crate::platform::{esp_result, Result};
 
@@ -13,6 +15,18 @@ pub fn start(config: &WifiManagerConfigRaw) -> Result {
 
 pub fn stop() -> Result {
     esp_result(unsafe { wifi_manager::wifi_manager_stop() })
+}
+
+pub unsafe fn switch_to_ap(
+    ssid: *const c_char,
+    password: *const c_char,
+    max_connections: u8,
+) -> Result {
+    esp_result(unsafe { wifi_manager::wifi_manager_switch_to_ap(ssid, password, max_connections) })
+}
+
+pub fn restore_normal() -> Result {
+    esp_result(unsafe { wifi_manager::wifi_manager_restore_normal() })
 }
 
 pub fn is_sta_connected() -> bool {

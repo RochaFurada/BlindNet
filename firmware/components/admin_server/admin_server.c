@@ -31,6 +31,8 @@ static bool s_running = false;
 static bool s_unlocked = false;
 static admin_server_mode_t s_mode = ADMIN_SERVER_MODE_BOOTSTRAP;
 static esp_timer_handle_t s_window_timer = NULL;
+static void (*s_on_window_closed)(void *ctx) = NULL;
+static void *s_window_ctx = NULL;
 static uint8_t s_challenge[32] = {0};
 static bool s_challenge_valid = false;
 
@@ -85,6 +87,38 @@ static const char HTML_PAGE[] =
 "</body>"
 "</html>";
 
+static const char MAINTENANCE_LOCKED_PAGE[] =
+"<!doctype html>"
+"<html>"
+"<head>"
+"<meta charset='utf-8'>"
+"<meta name='viewport' content='width=device-width, initial-scale=1'>"
+"<title>BlindNet Setup</title>"
+"<style>"
+"body{font-family:Arial,sans-serif;background:#101418;color:#f2f2f2;margin:0;padding:24px;}"
+".box{max-width:520px;margin:auto;background:#181f26;padding:20px;border-radius:14px;box-shadow:0 0 20px #0008;}"
+"h1{font-size:22px;margin-top:0;}"
+"label{display:block;margin-top:12px;font-size:14px;color:#cbd5df;}"
+"input{width:100%;box-sizing:border-box;padding:10px;margin-top:6px;border-radius:8px;border:1px solid #334;background:#0c1117;color:#fff;}"
+"button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:8px;background:#2d7dff;color:#fff;font-weight:bold;}"
+".hint{font-size:12px;color:#9aa4ad;margin-top:12px;line-height:1.4;}"
+"code{word-break:break-all;color:#b8d7ff;}"
+"</style>"
+"</head>"
+"<body>"
+"<div class='box'>"
+"<h1>BlindNet Admin</h1>"
+"<p class='hint'>Assine o desafio retornado em <code>/challenge</code> com sua chave privada e envie a assinatura DER em hexadecimal.</p>"
+"<form method='POST' action='/unlock'>"
+"<label>Assinatura DER em hex</label>"
+"<input name='signature_hex' maxlength='192' required>"
+"<button type='submit'>Desbloquear</button>"
+"</form>"
+"<p class='hint'>Sem assinatura válida, a configuração principal permanece fechada.</p>"
+"</div>"
+"</body>"
+"</html>";
+
 static const char MAINTENANCE_PAGE[] =
 "<!doctype html>"
 "<html>"
@@ -100,19 +134,12 @@ static const char MAINTENANCE_PAGE[] =
 "input{width:100%;box-sizing:border-box;padding:10px;margin-top:6px;border-radius:8px;border:1px solid #334;background:#0c1117;color:#fff;}"
 "button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:8px;background:#2d7dff;color:#fff;font-weight:bold;}"
 ".hint{font-size:12px;color:#9aa4ad;margin-top:12px;line-height:1.4;}"
-"code{word-break:break-all;color:#b8d7ff;}"
 "</style>"
 "</head>"
 "<body>"
 "<div class='box'>"
 "<h1>BlindNet Setup</h1>"
-"<p class='hint'>Janela administrativa temporária. Primeiro assine o desafio retornado em <code>/challenge</code> e envie a assinatura DER em hexadecimal.</p>"
-"<h2>Unlock</h2>"
-"<form method='POST' action='/unlock'>"
-"<label>Assinatura DER em hex</label>"
-"<input name='signature_hex' maxlength='192' required>"
-"<button type='submit'>Desbloquear</button>"
-"</form>"
+"<p class='hint'>Janela administrativa desbloqueada temporariamente.</p>"
 "<h2>Configurar membrane</h2>"
 "<form method='POST' action='/membrane/template/set'>"
 "<label>Template id</label>"
@@ -154,7 +181,7 @@ static const char MAINTENANCE_PAGE[] =
 "<input name='mqtt_client_id' maxlength='32' required>"
 "<button type='submit'>Remover dispositivo</button>"
 "</form>"
-"<p class='hint'>Sem unlock, o cadastro é recusado. A janela fecha automaticamente.</p>"
+"<p class='hint'>A janela fecha automaticamente.</p>"
 "</div>"
 "</body>"
 "</html>";
@@ -520,17 +547,40 @@ static esp_err_t compute_issuer_key_id(
         return ESP_FAIL;
     }
 
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+
+    int rc = mbedtls_pk_parse_public_key(
+        &pk,
+        (const unsigned char *)pem,
+        strlen(pem) + 1
+    );
+    if (rc != 0) {
+        mbedtls_pk_free(&pk);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t der_buf[512] = {0};
+    int der_len = mbedtls_pk_write_pubkey_der(&pk, der_buf, sizeof(der_buf));
+    mbedtls_pk_free(&pk);
+
+    if (der_len <= 0 || (size_t)der_len > sizeof(der_buf)) {
+        mbedtls_platform_zeroize(der_buf, sizeof(der_buf));
+        return ESP_FAIL;
+    }
+
+    const unsigned char *der = der_buf + sizeof(der_buf) - (size_t)der_len;
     uint8_t digest[32] = {0};
     mbedtls_md_context_t ctx;
     mbedtls_md_init(&ctx);
 
-    int rc = mbedtls_md_setup(&ctx, info, 0);
+    rc = mbedtls_md_setup(&ctx, info, 0);
     if (rc == 0) rc = mbedtls_md_starts(&ctx);
     if (rc == 0) {
         rc = mbedtls_md_update(
             &ctx,
-            (const unsigned char *)pem,
-            strlen(pem)
+            der,
+            (size_t)der_len
         );
     }
     if (rc == 0) rc = mbedtls_md_finish(&ctx, digest);
@@ -542,6 +592,7 @@ static esp_err_t compute_issuer_key_id(
     }
 
     mbedtls_platform_zeroize(digest, sizeof(digest));
+    mbedtls_platform_zeroize(der_buf, sizeof(der_buf));
     return rc == 0 ? ESP_OK : ESP_FAIL;
 }
 
@@ -679,6 +730,9 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     if (s_mode == ADMIN_SERVER_MODE_MAINTENANCE) {
+        if (!s_unlocked) {
+            return httpd_resp_send(req, MAINTENANCE_LOCKED_PAGE, HTTPD_RESP_USE_STRLEN);
+        }
         return httpd_resp_send(req, MAINTENANCE_PAGE, HTTPD_RESP_USE_STRLEN);
     }
     return httpd_resp_send(req, HTML_PAGE, HTTPD_RESP_USE_STRLEN);
@@ -777,8 +831,9 @@ static esp_err_t unlock_post_handler(httpd_req_t *req)
     generate_challenge();
     (void)restart_window_timer(ADMIN_UNLOCKED_WINDOW_MS);
 
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_sendstr(req, "unlocked");
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Refresh", "0; url=/");
+    httpd_resp_sendstr(req, "<!doctype html><html><body>unlocked</body></html>");
     result = ESP_OK;
 
 cleanup:
@@ -1277,6 +1332,8 @@ esp_err_t admin_server_start(const admin_server_config_t *config)
     }
 
     s_mode = config ? config->mode : ADMIN_SERVER_MODE_BOOTSTRAP;
+    s_on_window_closed = config ? config->on_window_closed : NULL;
+    s_window_ctx = config ? config->ctx : NULL;
     s_unlocked = false;
     if (s_mode == ADMIN_SERVER_MODE_MAINTENANCE) {
         generate_challenge();
@@ -1383,6 +1440,8 @@ esp_err_t admin_server_open_window(const admin_server_config_t *config, uint32_t
         .mode = ADMIN_SERVER_MODE_MAINTENANCE,
         .guardian_id = config ? config->guardian_id : 0,
         .zone_id = config ? config->zone_id : 0,
+        .on_window_closed = config ? config->on_window_closed : NULL,
+        .ctx = config ? config->ctx : NULL,
     };
 
     if (s_running && s_mode != ADMIN_SERVER_MODE_MAINTENANCE) {
@@ -1396,6 +1455,8 @@ esp_err_t admin_server_open_window(const admin_server_config_t *config, uint32_t
         }
     } else {
         s_unlocked = false;
+        s_on_window_closed = window_config.on_window_closed;
+        s_window_ctx = window_config.ctx;
         generate_challenge();
     }
 
@@ -1418,16 +1479,26 @@ esp_err_t admin_server_stop(void)
     }
 
     httpd_handle_t server = s_server;
+    bool was_maintenance = s_mode == ADMIN_SERVER_MODE_MAINTENANCE;
+    void (*on_window_closed)(void *ctx) = s_on_window_closed;
+    void *window_ctx = s_window_ctx;
 
     s_server = NULL;
     s_running = false;
     s_unlocked = false;
     s_challenge_valid = false;
+    s_on_window_closed = NULL;
+    s_window_ctx = NULL;
     mbedtls_platform_zeroize(s_challenge, sizeof(s_challenge));
 
     ESP_LOGW(TAG, "parando admin_server e liberando recursos");
 
-    return httpd_stop(server);
+    esp_err_t err = httpd_stop(server);
+    if (was_maintenance && on_window_closed) {
+        on_window_closed(window_ctx);
+    }
+
+    return err;
 }
 
 bool admin_server_is_running(void)

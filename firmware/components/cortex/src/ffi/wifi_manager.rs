@@ -1,4 +1,4 @@
-use core::ffi::c_void;
+use core::ffi::{c_char, c_void};
 
 use crate::ffi::EspErr;
 
@@ -36,6 +36,12 @@ pub type EspNetifRaw = c_void;
 unsafe extern "C" {
     pub fn wifi_manager_start(config: *const WifiManagerConfigRaw) -> EspErr;
     pub fn wifi_manager_stop() -> EspErr;
+    pub fn wifi_manager_switch_to_ap(
+        ssid: *const c_char,
+        password: *const c_char,
+        max_connections: u8,
+    ) -> EspErr;
+    pub fn wifi_manager_restore_normal() -> EspErr;
     pub fn wifi_manager_is_sta_connected() -> bool;
     pub fn wifi_manager_has_ip() -> bool;
     pub fn wifi_manager_get_status() -> WifiManagerStatusRaw;

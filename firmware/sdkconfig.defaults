@@ -6,9 +6,19 @@ CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
 CONFIG_BT_NIMBLE_GATT_CLIENT=y
 CONFIG_BT_NIMBLE_GATT_SERVER=y
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=6144
+CONFIG_NIMBLE_TASK_STACK_SIZE=6144
+CONFIG_BT_NIMBLE_TASK_STACK_SIZE=6144
 
 # The firmware is larger than the default 1M factory partition.
 # This keeps the 2MB-flash, single-app/no-OTA layout but expands the app slot to 1500K.
 # CONFIG_PARTITION_TABLE_SINGLE_APP is not set
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 CONFIG_PARTITION_TABLE_FILENAME="partitions_singleapp_large.csv"
+
+# Required by zone_gateway when sharing STA uplink through the AP netif.
+CONFIG_LWIP_IP_FORWARD=y
+CONFIG_LWIP_IPV4_NAPT=y
+
+# Rust-side normal-mode startup builds the action pipeline on the ESP-IDF main task.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

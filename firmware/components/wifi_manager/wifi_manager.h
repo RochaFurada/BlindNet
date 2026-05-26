@@ -43,6 +43,12 @@ typedef struct {
 
 esp_err_t wifi_manager_start(const wifi_manager_config_t *config);
 esp_err_t wifi_manager_stop(void);
+esp_err_t wifi_manager_switch_to_ap(
+    const char *ssid,
+    const char *password,
+    uint8_t max_connections
+);
+esp_err_t wifi_manager_restore_normal(void);
 
 bool wifi_manager_is_sta_connected(void);
 bool wifi_manager_has_ip(void);

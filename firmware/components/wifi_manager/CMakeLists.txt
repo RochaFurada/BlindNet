@@ -8,6 +8,7 @@ idf_component_register(
         esp_hw_support
         esp_netif
         esp_system
+        event_bus
         freertos
         log
         nvs_flash

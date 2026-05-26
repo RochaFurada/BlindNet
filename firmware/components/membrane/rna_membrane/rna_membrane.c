@@ -447,12 +447,7 @@ esp_err_t rna_membrane_load_or_init(rna_template_table_t *out_table)
         return err;
     }
 
-    err = rna_membrane_load_defaults(out_table);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    return rna_membrane_save(out_table);
+    return rna_membrane_load_defaults(out_table);
 }
 
 esp_err_t rna_membrane_save(const rna_template_table_t *table)

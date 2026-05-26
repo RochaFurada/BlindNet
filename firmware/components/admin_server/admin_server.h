@@ -19,6 +19,8 @@ typedef struct {
     admin_server_mode_t mode;
     uint32_t guardian_id;
     uint32_t zone_id;
+    void (*on_window_closed)(void *ctx);
+    void *ctx;
 } admin_server_config_t;
 
 esp_err_t admin_server_start(const admin_server_config_t *config);

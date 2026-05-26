@@ -14,7 +14,6 @@
 #include "host/ble_uuid.h"
 #include "host/util/util.h"
 #include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
 #include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
@@ -22,7 +21,7 @@
 static const char *TAG = "g2g_ble";
 
 #define G2G_ATT_MTU 247
-#define G2G_TX_TASK_STACK 4096
+#define G2G_TX_TASK_STACK 3072
 #define G2G_TX_TASK_PRIO 5
 #define G2G_CONN_TIMEOUT_MS 7000
 
@@ -106,6 +105,7 @@ static g2g_peer_t s_peers[G2G_BLE_MAX_PEERS];
 static QueueHandle_t s_tx_queue;
 static SemaphoreHandle_t s_tx_done;
 static TaskHandle_t s_tx_task;
+static TaskHandle_t s_host_task;
 static g2g_tx_ctx_t s_tx;
 
 static int gap_event(struct ble_gap_event *event, void *arg);
@@ -201,6 +201,7 @@ static esp_err_t start_advertising(void)
     struct ble_gap_adv_params params;
 
     if (!s_synced || s_advertising) {
+        ESP_LOGI(TAG, "Advertising ignorado synced=%d advertising=%d", s_synced ? 1 : 0, s_advertising ? 1 : 0);
         return ESP_OK;
     }
 
@@ -210,7 +211,9 @@ static esp_err_t start_advertising(void)
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = 1;
 
-    if (ble_gap_adv_set_fields(&fields) != 0) {
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gap_adv_set_fields rc=%d", rc);
         return ESP_FAIL;
     }
 
@@ -218,12 +221,15 @@ static esp_err_t start_advertising(void)
     params.conn_mode = BLE_GAP_CONN_MODE_UND;
     params.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
-    if (ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER,
-                          &params, gap_event, NULL) != 0) {
+    rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER,
+                           &params, gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gap_adv_start rc=%d", rc);
         return ESP_FAIL;
     }
 
     s_advertising = true;
+    ESP_LOGI(TAG, "G2G BLE advertising ativo");
     return ESP_OK;
 }
 
@@ -232,6 +238,7 @@ static esp_err_t start_scanning(void)
     struct ble_gap_disc_params params;
 
     if (!s_synced || s_scanning) {
+        ESP_LOGI(TAG, "Scan ignorado synced=%d scanning=%d", s_synced ? 1 : 0, s_scanning ? 1 : 0);
         return ESP_OK;
     }
 
@@ -241,11 +248,14 @@ static esp_err_t start_scanning(void)
     params.itvl = 0x0010;
     params.window = 0x0010;
 
-    if (ble_gap_disc(s_own_addr_type, BLE_HS_FOREVER, &params, gap_event, NULL) != 0) {
+    int rc = ble_gap_disc(s_own_addr_type, BLE_HS_FOREVER, &params, gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gap_disc rc=%d", rc);
         return ESP_FAIL;
     }
 
     s_scanning = true;
+    ESP_LOGI(TAG, "G2G BLE scan ativo");
     return ESP_OK;
 }
 
@@ -259,8 +269,13 @@ static void stop_scanning(void)
 
 static void resume_presence(void)
 {
-    (void)start_advertising();
-    (void)start_scanning();
+    esp_err_t adv_err = start_advertising();
+    esp_err_t scan_err = start_scanning();
+    if (adv_err != ESP_OK || scan_err != ESP_OK) {
+        ESP_LOGW(TAG, "resume_presence falhou adv=%s scan=%s",
+                 esp_err_to_name(adv_err),
+                 esp_err_to_name(scan_err));
+    }
 }
 
 static void tx_complete(bool ok)
@@ -492,16 +507,19 @@ static int rx_access_cb(
     uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
     if (len == 0 || len > G2G_BLE_FRAGMENT_MAX_LEN) {
         stats_inc(&s_stats.rx_errors);
+        ESP_LOGW(TAG, "RX write invalido len=%u", (unsigned)len);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
 
     uint8_t fragment[G2G_BLE_FRAGMENT_MAX_LEN];
     if (os_mbuf_copydata(ctxt->om, 0, len, fragment) != 0) {
         stats_inc(&s_stats.rx_errors);
+        ESP_LOGW(TAG, "RX copydata falhou len=%u", (unsigned)len);
         return BLE_ATT_ERR_UNLIKELY;
     }
 
     stats_inc(&s_stats.rx_fragments);
+    ESP_LOGI(TAG, "RX fragment len=%u", (unsigned)len);
     if (s_config.on_fragment) {
         s_config.on_fragment(fragment, len, s_config.ctx);
     }
@@ -523,20 +541,32 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         case BLE_GAP_EVENT_CONNECT:
             if (s_tx.active) {
                 if (event->connect.status == 0) {
+                    s_advertising = false;
+                    ESP_LOGI(TAG, "G2G BLE conectado outbound handle=%u", event->connect.conn_handle);
                     s_tx.conn_handle = event->connect.conn_handle;
                     if (ble_gattc_exchange_mtu(s_tx.conn_handle, mtu_cb, NULL) != 0) {
                         (void)mtu_cb(s_tx.conn_handle, NULL, 0, NULL);
                     }
                 } else {
+                    ESP_LOGW(TAG, "G2G BLE connect outbound falhou status=%d", event->connect.status);
                     tx_complete(false);
                 }
+            } else if (event->connect.status == 0) {
+                s_advertising = false;
+                ESP_LOGI(TAG, "G2G BLE conectado inbound handle=%u", event->connect.conn_handle);
+            } else {
+                ESP_LOGW(TAG, "G2G BLE connect inbound falhou status=%d", event->connect.status);
             }
             return 0;
 
         case BLE_GAP_EVENT_DISCONNECT:
+            ESP_LOGW(TAG, "G2G BLE desconectado handle=%u reason=%d",
+                     event->disconnect.conn.conn_handle,
+                     event->disconnect.reason);
             if (s_tx.active && s_tx.conn_handle == event->disconnect.conn.conn_handle) {
                 s_tx.conn_handle = BLE_HS_CONN_HANDLE_NONE;
             }
+            s_advertising = false;
             resume_presence();
             return 0;
 
@@ -563,6 +593,8 @@ static void on_reset(int reason)
 
 static void on_sync(void)
 {
+    ESP_LOGI(TAG, "NimBLE sync");
+
     int rc = ble_hs_util_ensure_addr(0);
     if (rc != 0) {
         ESP_LOGE(TAG, "ble_hs_util_ensure_addr rc=%d", rc);
@@ -576,14 +608,17 @@ static void on_sync(void)
     }
 
     s_synced = true;
+    ESP_LOGI(TAG, "NimBLE own_addr_type=%u", (unsigned)s_own_addr_type);
     resume_presence();
 }
 
 static void host_task(void *param)
 {
     (void)param;
+    ESP_LOGI(TAG, "NimBLE host task rodando stack=%u", (unsigned)NIMBLE_HS_STACK_SIZE);
     nimble_port_run();
-    nimble_port_freertos_deinit();
+    s_host_task = NULL;
+    vTaskDelete(NULL);
 }
 
 esp_err_t g2g_ble_start(const g2g_ble_config_t *config)
@@ -641,7 +676,14 @@ esp_err_t g2g_ble_start(const g2g_ble_config_t *config)
         return ESP_ERR_NO_MEM;
     }
 
-    nimble_port_freertos_init(host_task);
+    if (xTaskCreatePinnedToCore(host_task, "nimble_host", NIMBLE_HS_STACK_SIZE,
+                                NULL, (configMAX_PRIORITIES - 4), &s_host_task,
+                                NIMBLE_CORE) != pdPASS) {
+        ESP_LOGE(TAG, "falha ao criar nimble_host stack=%u", (unsigned)NIMBLE_HS_STACK_SIZE);
+        s_running = false;
+        nimble_port_deinit();
+        return ESP_ERR_NO_MEM;
+    }
 
     ESP_LOGI(TAG, "G2G BLE iniciado guardian=%lu zone=%lu",
              (unsigned long)s_config.guardian_id,
@@ -666,6 +708,15 @@ esp_err_t g2g_ble_stop(void)
     }
 
     nimble_port_stop();
+
+    if (s_tx_queue) {
+        vQueueDelete(s_tx_queue);
+        s_tx_queue = NULL;
+    }
+    if (s_tx_done) {
+        vSemaphoreDelete(s_tx_done);
+        s_tx_done = NULL;
+    }
     return ESP_OK;
 }
 

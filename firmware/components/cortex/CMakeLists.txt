@@ -1,5 +1,6 @@
 idf_component_register(
-    SRCS "cortex_component.c"
+    SRCS
+        "cortex_component.c"
     INCLUDE_DIRS "include"
     PRIV_REQUIRES
         action_pill
@@ -8,9 +9,11 @@ idf_component_register(
         device_registry
         dns_filter
         esp_common
+        esp_timer
         event_bus
         flow_table
         g2g_ble
+        log
         membrane
         MQTT_broker
         policy_engine
@@ -87,9 +90,11 @@ target_link_libraries(cortex_rust INTERFACE
     idf::device_registry
     idf::dns_filter
     idf::esp_common
+    idf::esp_timer
     idf::event_bus
     idf::flow_table
     idf::g2g_ble
+    idf::log
     idf::membrane
     idf::MQTT_broker
     idf::policy_engine

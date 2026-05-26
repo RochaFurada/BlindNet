@@ -52,10 +52,8 @@ void config_store_set_defaults(zoneguard_config_t *config)
     cfg_copy(config->telemetry_host, sizeof(config->telemetry_host), "");
     config->telemetry_port = 5757;
 
-    config->swarm_key_len = 16;
-    for (int i = 0; i < config->swarm_key_len; ++i) {
-        config->swarm_key[i] = (uint8_t)esp_random();
-    }
+    config->swarm_key_len = 0;
+    memset(config->swarm_key, 0, sizeof(config->swarm_key));
 
     config->policy_version = 1;
 }

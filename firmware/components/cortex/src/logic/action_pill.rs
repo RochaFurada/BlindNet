@@ -45,15 +45,10 @@ pub fn precheck_for_relay(pill: &ActionPill, now_ms: u32) -> Result {
 pub fn validate_authorized(
     pill: &ActionPill,
     now_ms: u32,
-    expected_network_id: &[u8; capsule_pill::CAPSULE_PILL_NETWORK_ID_LEN],
     expected_issuer_key_id: &[u8; capsule_pill::CAPSULE_PILL_ISSUER_KEY_ID_LEN],
     issuer_public_key: &[u8],
 ) -> Result {
     precheck_for_relay(pill, now_ms)?;
-
-    if !network_id_matches(pill, expected_network_id) {
-        return Err(platform::ESP_ERR_INVALID_STATE);
-    }
 
     if !issuer_key_matches(pill, expected_issuer_key_id) {
         return Err(platform::ESP_ERR_INVALID_STATE);
@@ -72,13 +67,6 @@ pub fn validate_authorized(
 
 pub fn capsule_matches_active(pill: &ActionPill) -> bool {
     capsule_pill::matches_active(&pill.capsule, &pill.active)
-}
-
-pub fn network_id_matches(
-    pill: &ActionPill,
-    expected_network_id: &[u8; capsule_pill::CAPSULE_PILL_NETWORK_ID_LEN],
-) -> bool {
-    capsule_pill::constant_time_equal(&pill.capsule.network_id, expected_network_id)
 }
 
 pub fn issuer_key_matches(

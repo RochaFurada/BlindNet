@@ -22,6 +22,8 @@ pub const ZG_EVENT_GATEWAY_UP: ZgEventType = 12;
 pub const ZG_EVENT_GATEWAY_DOWN: ZgEventType = 13;
 pub const ZG_EVENT_CONFIG_UPDATED: ZgEventType = 14;
 pub const ZG_EVENT_ERROR: ZgEventType = 15;
+pub const ZG_EVENT_AP_CLIENT_JOINED: ZgEventType = 16;
+pub const ZG_EVENT_AP_CLIENT_LEFT: ZgEventType = 17;
 
 #[repr(C)]
 pub struct ZgEventRaw {
