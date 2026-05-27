@@ -29,6 +29,7 @@ esp_err_t admin_server_stop(void);
 bool admin_server_is_running(void);
 bool admin_server_is_unlocked(void);
 void admin_server_lock(void);
+void admin_server_note_mqtt_client(const char *client_id);
 
 #ifdef __cplusplus
 }

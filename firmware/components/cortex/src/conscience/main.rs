@@ -8,18 +8,17 @@ use crate::platform::capsule_pill::CAPSULE_PILL_ISSUER_KEY_ID_LEN;
 use crate::platform::config::ZoneguardConfigRaw;
 use crate::platform::dns_filter::{DnsFilterConfigRaw, DnsFilterRuleRaw};
 use crate::platform::event_bus::ZgEventRaw;
-use crate::platform::flow_table::{FlowKeyRaw, FlowTableConfigRaw};
+use crate::platform::flow_table::FlowTableConfigRaw;
 use crate::platform::mqtt_broker::{
     MqttBrokerConfigRaw, MqttBrokerConnectRaw, MqttBrokerMessageRaw,
 };
 use crate::platform::policy_engine::{PolicyEngineConfigRaw, PolicyRuleRaw};
-use crate::platform::quarantine_manager::QuarantineManagerConfigRaw;
 use crate::platform::rate_limiter::{RateLimitParamsRaw, RateLimitRuleRaw, RateLimiterConfigRaw};
 use crate::platform::wifi_manager::WifiManagerConfigRaw;
 use crate::platform::{
     admin_server, config, device_registry, dns_filter, event_bus, flow_table, mqtt_broker,
-    policy_engine, quarantine_manager, rate_limiter, setup_ap, setup_button, wifi_manager,
-    zone_firewall, zone_gateway, Result,
+    policy_engine, rate_limiter, setup_ap, setup_button, wifi_manager, zone_firewall, zone_gateway,
+    Result,
 };
 
 use crate::ffi::config_store::CONFIG_STORE_PUBLIC_KEY_MAX_LEN;
@@ -37,16 +36,40 @@ const ADMIN_SETUP_BUTTON_GPIO: i32 = setup_button::SETUP_BUTTON_DEFAULT_GPIO;
 const ADMIN_SETUP_HOLD_MS: u32 = setup_button::SETUP_BUTTON_DEFAULT_HOLD_MS;
 const ADMIN_SETUP_POLL_MS: u32 = setup_button::SETUP_BUTTON_DEFAULT_POLL_MS;
 const ADMIN_SETUP_UNLOCK_WINDOW_MS: u32 = 180_000;
+const ADMIN_STATUS_LED_GPIO: c_int = 2;
+const ADMIN_STATUS_LED_BLINKS: u32 = 3;
+const ADMIN_STATUS_LED_ON_US: i64 = 120_000;
+const ADMIN_STATUS_LED_OFF_US: i64 = 120_000;
+const ENABLE_OPTIONAL_GATEWAY_SERVICES: bool = false;
+const ENABLE_OPTIONAL_SECURITY_SERVICES: bool = false;
 const ESP_LOG_WARN: c_int = 2;
 const ESP_LOG_INFO: c_int = 3;
+const GPIO_MODE_OUTPUT: c_int = 2;
 const TAG_PIPELINE: &[u8] = b"cortex_pipeline\0";
+const TAG_ADMIN: &[u8] = b"cortex_admin\0";
+const TAG_STATE: &[u8] = b"cortex_state\0";
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum ConscienceState {
+    Boot,
+    Setup,
+    NormalCore,
+    NormalOnline,
+    Admin,
+    ActionPillProcessing,
+}
 
 static mut ACTION_PIPELINE: Option<ActionPipeline> = None;
+static mut CURRENT_STATE: ConscienceState = ConscienceState::Boot;
 static mut ADMIN_WINDOW_ACTIVE: bool = false;
 static mut ADMIN_WINDOW_HAS_CLIENT: bool = false;
 
 unsafe extern "C" {
     fn esp_timer_get_time() -> i64;
+    fn esp_restart();
+    fn gpio_reset_pin(gpio_num: c_int) -> c_int;
+    fn gpio_set_direction(gpio_num: c_int, mode: c_int) -> c_int;
+    fn gpio_set_level(gpio_num: c_int, level: u32) -> c_int;
     fn esp_log_write(level: c_int, tag: *const c_char, format: *const c_char, ...);
 }
 
@@ -58,6 +81,8 @@ pub fn run_code() -> platform::EspErr {
 }
 
 pub fn run() -> Result {
+    transition_to(ConscienceState::Boot);
+
     event_bus::init()?;
     unsafe { event_bus::subscribe(Some(on_event), ptr::null_mut())? };
 
@@ -65,9 +90,11 @@ pub fn run() -> Result {
 
     let mut cfg: ZoneguardConfigRaw = zeroed_raw();
     if config::load(&mut cfg).is_err() {
+        transition_to(ConscienceState::Setup);
         return enter_setup_mode();
     }
 
+    transition_to(ConscienceState::NormalCore);
     enter_normal_mode(&cfg)
 }
 
@@ -159,7 +186,34 @@ fn enter_setup_mode() -> Result {
 
 fn enter_normal_mode(cfg: &ZoneguardConfigRaw) -> Result {
     device_registry::init(cfg.zone_id)?;
+    start_normal_wifi(cfg)?;
 
+    init_action_pipeline(cfg)?;
+
+    start_admin_setup_button()?;
+
+    start_normal_mqtt(cfg)?;
+
+    g2g::set_action_pill_handler(Some(on_action_pill_received));
+    g2g::start(cfg.guardian_id, cfg.zone_id)?;
+
+    if ENABLE_OPTIONAL_SECURITY_SERVICES {
+        start_optional_security_services(cfg)?;
+    } else {
+        log_optional_services("security", false);
+    }
+
+    if ENABLE_OPTIONAL_GATEWAY_SERVICES {
+        start_optional_gateway_services(cfg)?;
+    } else {
+        log_optional_services("gateway", false);
+    }
+
+    transition_to(ConscienceState::NormalOnline);
+    Ok(())
+}
+
+fn start_normal_wifi(cfg: &ZoneguardConfigRaw) -> Result {
     let mut wifi_config: WifiManagerConfigRaw = zeroed_raw();
     copy_c_char_to_u8(&mut wifi_config.sta_ssid, &cfg.sta_ssid);
     copy_c_char_to_u8(&mut wifi_config.sta_password, &cfg.sta_password);
@@ -177,7 +231,22 @@ fn enter_normal_mode(cfg: &ZoneguardConfigRaw) -> Result {
     };
     wifi_config.sta_max_retries = 10;
     wifi_config.ap_hidden = false;
-    wifi_manager::start(&wifi_config)?;
+    wifi_manager::start(&wifi_config)
+}
+
+fn start_normal_mqtt(cfg: &ZoneguardConfigRaw) -> Result {
+    let mut mqtt_config: MqttBrokerConfigRaw = zeroed_raw();
+    mqtt_broker::config_defaults(&mut mqtt_config);
+    mqtt_config.zone_id = cfg.zone_id;
+    mqtt_config.listen_port = mqtt_broker::MQTT_BROKER_DEFAULT_PORT;
+    mqtt_config.connect_cb = Some(on_mqtt_connect);
+    mqtt_config.message_cb = Some(on_mqtt_message);
+    mqtt_config.bind_ip = 0;
+    unsafe { mqtt_broker::start(Some(&mqtt_config)) }
+}
+
+fn start_optional_security_services(cfg: &ZoneguardConfigRaw) -> Result {
+    log_optional_services("security", true);
 
     let flow_config = FlowTableConfigRaw {
         max_idle_ms: 60_000,
@@ -206,19 +275,17 @@ fn enter_normal_mode(cfg: &ZoneguardConfigRaw) -> Result {
     rate_limiter::init(Some(&rate_config))?;
     add_initial_rate_limits()?;
 
-    let quarantine_config = QuarantineManagerConfigRaw {
-        default_ttl_ms: 60_000,
-        evict_lru_when_full: true,
-    };
-    quarantine_manager::init(Some(&quarantine_config))?;
-
     let fw_config = zone_firewall::ZoneFirewallConfigRaw {
         zone_id: cfg.zone_id,
         default_allow: true,
-        auto_quarantine_on_rate_limit: true,
-        quarantine_ttl_ms: 60_000,
+        auto_quarantine_on_rate_limit: false,
+        quarantine_ttl_ms: 0,
     };
-    zone_firewall::init(&fw_config)?;
+    zone_firewall::init(&fw_config)
+}
+
+fn start_optional_gateway_services(_cfg: &ZoneguardConfigRaw) -> Result {
+    log_optional_services("gateway", true);
 
     let gateway_config = zone_gateway::ZoneGatewayConfigRaw {
         wait_for_sta_ip: true,
@@ -234,29 +301,7 @@ fn enter_normal_mode(cfg: &ZoneguardConfigRaw) -> Result {
         upstream_dns_ip: dns_filter::ipv4(8, 8, 8, 8),
         default_allow: true,
     };
-    let _ = init_and_start_dns(&dns_config);
-
-    let mut mqtt_config: MqttBrokerConfigRaw = zeroed_raw();
-    mqtt_broker::config_defaults(&mut mqtt_config);
-    mqtt_config.zone_id = cfg.zone_id;
-    mqtt_config.listen_port = mqtt_broker::MQTT_BROKER_DEFAULT_PORT;
-    mqtt_config.connect_cb = Some(on_mqtt_connect);
-    mqtt_config.message_cb = Some(on_mqtt_message);
-    if let Ok(ap_ip) = wifi_manager::ap_ip() {
-        mqtt_config.bind_ip = ap_ip;
-    }
-    unsafe {
-        let _ = mqtt_broker::start(Some(&mqtt_config));
-    }
-
-    init_action_pipeline(cfg)?;
-
-    start_admin_setup_button()?;
-
-    g2g::set_action_pill_handler(Some(on_action_pill_received));
-    g2g::start(cfg.guardian_id, cfg.zone_id)?;
-
-    Ok(())
+    init_and_start_dns(&dns_config)
 }
 
 fn init_action_pipeline(cfg: &ZoneguardConfigRaw) -> Result {
@@ -401,23 +446,6 @@ fn add_initial_dns_rules() -> Result {
     dns_filter::add_rule(&block_bad, None)
 }
 
-fn test_zone_firewall_fake_flow() -> Result {
-    let key = FlowKeyRaw {
-        src_ip: policy_engine::ipv4(192, 168, 4, 2),
-        dst_ip: policy_engine::ipv4(8, 8, 8, 8),
-        src_port: 50_000,
-        dst_port: 53,
-        proto: flow_table::FLOW_PROTO_UDP as u8,
-    };
-    let mut decision: zone_firewall::ZoneFirewallDecisionRaw = zeroed_raw();
-    zone_firewall::evaluate_flow(
-        &key,
-        flow_table::FLOW_DIRECTION_ZONE_TO_UPLINK,
-        80,
-        &mut decision,
-    )
-}
-
 unsafe extern "C" fn on_admin_setup_button_hold(_ctx: *mut c_void) {
     unsafe {
         if ADMIN_WINDOW_ACTIVE {
@@ -426,6 +454,9 @@ unsafe extern "C" fn on_admin_setup_button_hold(_ctx: *mut c_void) {
         ADMIN_WINDOW_ACTIVE = true;
         ADMIN_WINDOW_HAS_CLIENT = false;
     }
+
+    transition_to(ConscienceState::Admin);
+    enter_admin_quiescent_mode();
 
     if unsafe {
         wifi_manager::switch_to_ap(
@@ -440,7 +471,7 @@ unsafe extern "C" fn on_admin_setup_button_hold(_ctx: *mut c_void) {
             ADMIN_WINDOW_ACTIVE = false;
             ADMIN_WINDOW_HAS_CLIENT = false;
         }
-        return;
+        unsafe { esp_restart() };
     }
 
     let admin_config = AdminServerConfigRaw {
@@ -458,24 +489,64 @@ unsafe extern "C" fn on_admin_setup_button_hold(_ctx: *mut c_void) {
             ADMIN_WINDOW_ACTIVE = false;
             ADMIN_WINDOW_HAS_CLIENT = false;
         }
-        let _ = wifi_manager::restore_normal();
+        unsafe { esp_restart() };
     }
+
+    blink_admin_status_led();
 }
 
 unsafe extern "C" fn on_admin_window_closed(_ctx: *mut c_void) {
     ADMIN_WINDOW_ACTIVE = false;
     ADMIN_WINDOW_HAS_CLIENT = false;
-    let _ = wifi_manager::restore_normal();
+    esp_restart();
+}
+
+fn enter_admin_quiescent_mode() {
+    log_admin_entering();
+    let _ = g2g::stop();
+    let _ = dns_filter::stop();
+    let _ = zone_gateway::stop();
+    let _ = mqtt_broker::stop();
+}
+
+fn blink_admin_status_led() {
+    unsafe {
+        if gpio_reset_pin(ADMIN_STATUS_LED_GPIO) != platform::ESP_OK {
+            return;
+        }
+        if gpio_set_direction(ADMIN_STATUS_LED_GPIO, GPIO_MODE_OUTPUT) != platform::ESP_OK {
+            return;
+        }
+
+        for _ in 0..ADMIN_STATUS_LED_BLINKS {
+            let _ = gpio_set_level(ADMIN_STATUS_LED_GPIO, 1);
+            delay_us(ADMIN_STATUS_LED_ON_US);
+            let _ = gpio_set_level(ADMIN_STATUS_LED_GPIO, 0);
+            delay_us(ADMIN_STATUS_LED_OFF_US);
+        }
+    }
+}
+
+fn delay_us(duration_us: i64) {
+    let start = unsafe { esp_timer_get_time() };
+    while unsafe { esp_timer_get_time() } - start < duration_us {
+        core::hint::spin_loop();
+    }
 }
 
 fn on_action_pill_received(pill: &ActionPill) -> Result {
     let pill_copy = *pill;
+    let previous_state = current_state();
+    transition_to(ConscienceState::ActionPillProcessing);
+
     unsafe {
         let pipeline = ptr::addr_of_mut!(ACTION_PIPELINE);
-        match (*pipeline).as_mut() {
+        let result = match (*pipeline).as_mut() {
             Some(pipeline) => pipeline.process_action_pill(pill_copy),
             None => Err(platform::ESP_ERR_INVALID_STATE),
-        }
+        };
+        transition_to(previous_state);
+        result
     }
 }
 
@@ -486,7 +557,16 @@ unsafe extern "C" fn on_mqtt_connect(
     event: *const MqttBrokerConnectRaw,
     _ctx: *mut c_void,
 ) -> bool {
-    !event.is_null()
+    if event.is_null() {
+        return false;
+    }
+
+    let client_id = unsafe { (*event).client_id };
+    if !client_id.is_null() {
+        unsafe { admin_server::note_mqtt_client(client_id) };
+    }
+
+    true
 }
 
 // Retirar depdedência C direta
@@ -508,6 +588,58 @@ unsafe extern "C" fn on_event(event: *const ZgEventRaw, _ctx: *mut c_void) {
             }
         }
         _ => {}
+    }
+}
+
+fn current_state() -> ConscienceState {
+    unsafe { CURRENT_STATE }
+}
+
+fn transition_to(next: ConscienceState) {
+    unsafe {
+        let previous = CURRENT_STATE;
+        if previous == next {
+            return;
+        }
+
+        CURRENT_STATE = next;
+        esp_log_write(
+            ESP_LOG_INFO,
+            TAG_STATE.as_ptr().cast(),
+            c"state %s -> %s".as_ptr(),
+            state_name(previous),
+            state_name(next),
+        );
+    }
+}
+
+fn state_name(state: ConscienceState) -> *const c_char {
+    match state {
+        ConscienceState::Boot => c"BOOT".as_ptr(),
+        ConscienceState::Setup => c"SETUP".as_ptr(),
+        ConscienceState::NormalCore => c"NORMAL_CORE".as_ptr(),
+        ConscienceState::NormalOnline => c"NORMAL_ONLINE".as_ptr(),
+        ConscienceState::Admin => c"ADMIN".as_ptr(),
+        ConscienceState::ActionPillProcessing => c"ACTION_PILL".as_ptr(),
+    }
+}
+
+fn log_optional_services(name: &str, enabled: bool) {
+    let status = if enabled {
+        c"enabled".as_ptr()
+    } else {
+        c"disabled".as_ptr()
+    };
+    let name = name.as_bytes();
+    unsafe {
+        esp_log_write(
+            ESP_LOG_INFO,
+            TAG_STATE.as_ptr().cast(),
+            c"optional %.*s services %s".as_ptr(),
+            name.len() as c_int,
+            name.as_ptr().cast::<c_char>(),
+            status,
+        );
     }
 }
 
@@ -570,6 +702,20 @@ fn now_ms() -> u32 {
 fn zeroed_raw<T>() -> T {
     let raw = MaybeUninit::<T>::zeroed();
     unsafe { raw.assume_init() }
+}
+
+fn log_admin_tag() -> *const c_char {
+    TAG_ADMIN.as_ptr().cast()
+}
+
+fn log_admin_entering() {
+    unsafe {
+        esp_log_write(
+            ESP_LOG_WARN,
+            log_admin_tag(),
+            c"entrando em modo admin exclusivo; parando servicos normais".as_ptr(),
+        );
+    }
 }
 
 fn log_pipeline_tag() -> *const c_char {

@@ -4,7 +4,7 @@ use crate::ffi::EspErr;
 
 pub const G2G_BLE_FRAGMENT_MAX_LEN: usize = 220;
 pub const G2G_BLE_MAX_PEERS: usize = 8;
-pub const G2G_BLE_TX_QUEUE_LEN: usize = 16;
+pub const G2G_BLE_TX_QUEUE_LEN: usize = 4;
 
 pub type G2gBleFragmentCb =
     Option<unsafe extern "C" fn(bytes: *const u8, len: usize, ctx: *mut c_void)>;

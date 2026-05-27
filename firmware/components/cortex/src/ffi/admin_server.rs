@@ -26,4 +26,5 @@ unsafe extern "C" {
     pub fn admin_server_is_running() -> bool;
     pub fn admin_server_is_unlocked() -> bool;
     pub fn admin_server_lock();
+    pub fn admin_server_note_mqtt_client(client_id: *const c_char);
 }

@@ -1,0 +1,12 @@
+{
+  "action_pill": "action_pill.bin",
+  "action_pill_len": 480,
+  "fragment_count": 3,
+  "message_id_hex": "f7e7a444d5c306a65233840e03e2d5b6975bbd95a4c1694877c4e4e160f1948c",
+  "issuer_key_id_hex": "425e6d634ba7107b23a73d55e6f6ffc0",
+  "active_hash_hex": "4d01f63cf3fb157a9fb55ad15e9d54687049d99429ffb2915955e25cf036b699",
+  "empty_active": false,
+  "signature_len": 70,
+  "service_uuid": "0150534e-4152-542d-5041-2d4732474e42",
+  "char_uuid": "01454d47-4152-462d-5852-2d4732474e42"
+}

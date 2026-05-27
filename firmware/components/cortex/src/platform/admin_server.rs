@@ -1,5 +1,6 @@
 use crate::ffi::admin_server;
 use crate::platform::{esp_result, Result};
+use core::ffi::c_char;
 
 pub use crate::ffi::admin_server::{
     AdminServerConfigRaw, AdminServerMode, ADMIN_SERVER_MODE_BOOTSTRAP,
@@ -32,4 +33,8 @@ pub fn is_unlocked() -> bool {
 
 pub fn lock() {
     unsafe { admin_server::admin_server_lock() };
+}
+
+pub unsafe fn note_mqtt_client(client_id: *const c_char) {
+    unsafe { admin_server::admin_server_note_mqtt_client(client_id) };
 }

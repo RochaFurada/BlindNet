@@ -1,0 +1,7 @@
+{
+  "issuer_public_key_pem": "test_keys\\issuer_public_key.pem",
+  "issuer_key_id_hex": "425e6d634ba7107b23a73d55e6f6ffc0",
+  "device_secret_hex": "c50c998b1d6d6544a61e2df41d21c208e4d60596ba564d62a63d0e1f33840160",
+  "ribosome_epoch": 1,
+  "note": "Cadastre device_secret_hex no ribosome do ESP com o mesmo mqtt_client_id usado no send_action_pill_ble.py."
+}

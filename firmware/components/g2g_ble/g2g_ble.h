@@ -12,7 +12,7 @@ extern "C" {
 
 #define G2G_BLE_FRAGMENT_MAX_LEN 220
 #define G2G_BLE_MAX_PEERS 8
-#define G2G_BLE_TX_QUEUE_LEN 16
+#define G2G_BLE_TX_QUEUE_LEN 4
 
 typedef void (*g2g_ble_fragment_cb_t)(
     const uint8_t *bytes,

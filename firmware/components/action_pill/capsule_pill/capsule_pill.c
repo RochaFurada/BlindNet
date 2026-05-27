@@ -223,9 +223,6 @@ esp_err_t capsule_pill_validate_basic(
     }
     if (now_ms != 0 && now_ms > capsule->expires_ms) return ESP_ERR_TIMEOUT;
 
-    if (bytes_all_zero(capsule->network_id, sizeof(capsule->network_id))) {
-        return ESP_ERR_INVALID_ARG;
-    }
     if (bytes_all_zero(capsule->nonce, sizeof(capsule->nonce))) {
         return ESP_ERR_INVALID_ARG;
     }

@@ -9,6 +9,7 @@ idf_component_register(
         device_registry
         dns_filter
         esp_common
+        esp_driver_gpio
         esp_timer
         event_bus
         flow_table
@@ -90,6 +91,7 @@ target_link_libraries(cortex_rust INTERFACE
     idf::device_registry
     idf::dns_filter
     idf::esp_common
+    idf::esp_driver_gpio
     idf::esp_timer
     idf::event_bus
     idf::flow_table

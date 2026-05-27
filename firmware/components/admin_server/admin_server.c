@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 #include "esp_log.h"
 #include "esp_http_server.h"
@@ -16,6 +17,7 @@
 #include "psa/crypto.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 #include "freertos/task.h"
 
 #include "config_store.h"
@@ -39,7 +41,25 @@ static bool s_challenge_valid = false;
 #define ADMIN_POST_BUF_SIZE 2048
 #define ADMIN_SIGNATURE_MAX_LEN 96
 #define ADMIN_DEVICE_SECRET_HEX_LEN (RIBOSOME_DEVICE_SECRET_LEN * 2)
-#define ADMIN_UNLOCKED_WINDOW_MS 120000
+#define ADMIN_UNLOCKED_WINDOW_MS 180000
+#define ADMIN_SEEN_CLIENTS_MAX 16
+#define ADMIN_HTTPD_START_RETRIES 6
+#define ADMIN_HTTPD_START_RETRY_DELAY_MS 250
+#define ADMIN_HTTPD_FORCE_STOP_DELAY_MS 500
+#define ADMIN_HTTPD_STACK_SIZE 8192
+#define ADMIN_HTTPD_BOOTSTRAP_STACK_SIZE 8192
+
+typedef struct {
+    bool in_use;
+    char client_id[RIBOSOME_MQTT_CLIENT_ID_LEN];
+    uint32_t seen_count;
+    int64_t last_seen_us;
+} admin_seen_client_t;
+
+static admin_seen_client_t s_seen_clients[ADMIN_SEEN_CLIENTS_MAX];
+static portMUX_TYPE s_seen_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void safe_copy(char *dst, size_t dst_size, const char *src);
 
 static const char HTML_PAGE[] =
 "<!doctype html>"
@@ -119,7 +139,7 @@ static const char MAINTENANCE_LOCKED_PAGE[] =
 "</body>"
 "</html>";
 
-static const char MAINTENANCE_PAGE[] =
+static const char MAINTENANCE_PAGE[] __attribute__((unused)) =
 "<!doctype html>"
 "<html>"
 "<head>"
@@ -185,6 +205,47 @@ static const char MAINTENANCE_PAGE[] =
 "</div>"
 "</body>"
 "</html>";
+
+void admin_server_note_mqtt_client(const char *client_id)
+{
+    if (!client_id || client_id[0] == '\0') {
+        return;
+    }
+
+    char clean_id[RIBOSOME_MQTT_CLIENT_ID_LEN] = {0};
+    safe_copy(clean_id, sizeof(clean_id), client_id);
+    int64_t now_us = esp_timer_get_time();
+    int empty_slot = -1;
+    int oldest_slot = 0;
+    int64_t oldest_seen = INT64_MAX;
+
+    portENTER_CRITICAL(&s_seen_lock);
+    for (int i = 0; i < ADMIN_SEEN_CLIENTS_MAX; ++i) {
+        if (s_seen_clients[i].in_use &&
+            strncmp(s_seen_clients[i].client_id, clean_id, RIBOSOME_MQTT_CLIENT_ID_LEN) == 0) {
+            s_seen_clients[i].seen_count++;
+            s_seen_clients[i].last_seen_us = now_us;
+            portEXIT_CRITICAL(&s_seen_lock);
+            return;
+        }
+
+        if (!s_seen_clients[i].in_use && empty_slot < 0) {
+            empty_slot = i;
+        }
+        if (s_seen_clients[i].last_seen_us < oldest_seen) {
+            oldest_seen = s_seen_clients[i].last_seen_us;
+            oldest_slot = i;
+        }
+    }
+
+    int slot = empty_slot >= 0 ? empty_slot : oldest_slot;
+    memset(&s_seen_clients[slot], 0, sizeof(s_seen_clients[slot]));
+    s_seen_clients[slot].in_use = true;
+    strncpy(s_seen_clients[slot].client_id, clean_id, sizeof(s_seen_clients[slot].client_id) - 1);
+    s_seen_clients[slot].seen_count = 1;
+    s_seen_clients[slot].last_seen_us = now_us;
+    portEXIT_CRITICAL(&s_seen_lock);
+}
 
 static void safe_copy(char *dst, size_t dst_size, const char *src)
 {
@@ -511,26 +572,12 @@ static esp_err_t validate_issuer_public_key_pem(const char *pem)
         return ESP_ERR_INVALID_ARG;
     }
 
-    mbedtls_pk_context pk;
-    mbedtls_pk_init(&pk);
-
-    int rc = mbedtls_pk_parse_public_key(
-        &pk,
-        (const unsigned char *)pem,
-        strlen(pem) + 1
-    );
-
-    if (rc == 0 &&
-        !mbedtls_pk_can_do_psa(
-            &pk,
-            PSA_ALG_ECDSA(PSA_ALG_SHA_256),
-            PSA_KEY_USAGE_VERIFY_HASH
-        )) {
-        rc = -1;
+    if (!strstr(pem, "-----BEGIN PUBLIC KEY-----") ||
+        !strstr(pem, "-----END PUBLIC KEY-----")) {
+        return ESP_ERR_INVALID_ARG;
     }
 
-    mbedtls_pk_free(&pk);
-    return rc == 0 ? ESP_OK : ESP_ERR_INVALID_ARG;
+    return ESP_OK;
 }
 
 static esp_err_t compute_issuer_key_id(
@@ -547,41 +594,23 @@ static esp_err_t compute_issuer_key_id(
         return ESP_FAIL;
     }
 
-    mbedtls_pk_context pk;
-    mbedtls_pk_init(&pk);
-
-    int rc = mbedtls_pk_parse_public_key(
-        &pk,
-        (const unsigned char *)pem,
-        strlen(pem) + 1
-    );
-    if (rc != 0) {
-        mbedtls_pk_free(&pk);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    uint8_t der_buf[512] = {0};
-    int der_len = mbedtls_pk_write_pubkey_der(&pk, der_buf, sizeof(der_buf));
-    mbedtls_pk_free(&pk);
-
-    if (der_len <= 0 || (size_t)der_len > sizeof(der_buf)) {
-        mbedtls_platform_zeroize(der_buf, sizeof(der_buf));
-        return ESP_FAIL;
-    }
-
-    const unsigned char *der = der_buf + sizeof(der_buf) - (size_t)der_len;
     uint8_t digest[32] = {0};
     mbedtls_md_context_t ctx;
     mbedtls_md_init(&ctx);
 
-    rc = mbedtls_md_setup(&ctx, info, 0);
+    int rc = mbedtls_md_setup(&ctx, info, 0);
     if (rc == 0) rc = mbedtls_md_starts(&ctx);
     if (rc == 0) {
-        rc = mbedtls_md_update(
-            &ctx,
-            der,
-            (size_t)der_len
-        );
+        for (const char *p = pem; *p; ++p) {
+            if (*p == '\r') {
+                continue;
+            }
+            unsigned char ch = (unsigned char)*p;
+            rc = mbedtls_md_update(&ctx, &ch, 1);
+            if (rc != 0) {
+                break;
+            }
+        }
     }
     if (rc == 0) rc = mbedtls_md_finish(&ctx, digest);
 
@@ -592,7 +621,6 @@ static esp_err_t compute_issuer_key_id(
     }
 
     mbedtls_platform_zeroize(digest, sizeof(digest));
-    mbedtls_platform_zeroize(der_buf, sizeof(der_buf));
     return rc == 0 ? ESP_OK : ESP_FAIL;
 }
 
@@ -726,6 +754,524 @@ static esp_err_t restart_window_timer(uint32_t timeout_ms)
     return esp_timer_start_once(s_window_timer, (uint64_t)timeout_ms * 1000ULL);
 }
 
+static esp_err_t send_chunkf(httpd_req_t *req, const char *fmt, ...)
+{
+    char chunk[768];
+    va_list args;
+    va_list args_copy;
+    va_start(args, fmt);
+    va_copy(args_copy, args);
+    int len = vsnprintf(chunk, sizeof(chunk), fmt, args);
+    va_end(args);
+
+    if (len < 0) {
+        va_end(args_copy);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    if ((size_t)len < sizeof(chunk)) {
+        va_end(args_copy);
+        return httpd_resp_send_chunk(req, chunk, len);
+    }
+
+    char *heap_chunk = (char *)malloc((size_t)len + 1);
+    if (!heap_chunk) {
+        va_end(args_copy);
+        return ESP_ERR_NO_MEM;
+    }
+
+    int heap_len = vsnprintf(heap_chunk, (size_t)len + 1, fmt, args_copy);
+    va_end(args_copy);
+    if (heap_len < 0 || heap_len != len) {
+        free(heap_chunk);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    esp_err_t err = httpd_resp_send_chunk(req, heap_chunk, heap_len);
+    free(heap_chunk);
+    return err;
+}
+
+static esp_err_t send_escaped(httpd_req_t *req, const char *text)
+{
+    if (!text) {
+        return ESP_OK;
+    }
+
+    for (const char *p = text; *p; ++p) {
+        const char *escaped = NULL;
+        switch (*p) {
+        case '&':
+            escaped = "&amp;";
+            break;
+        case '<':
+            escaped = "&lt;";
+            break;
+        case '>':
+            escaped = "&gt;";
+            break;
+        case '"':
+            escaped = "&quot;";
+            break;
+        case '\'':
+            escaped = "&#39;";
+            break;
+        default:
+            break;
+        }
+
+        esp_err_t err = escaped ?
+            httpd_resp_send_chunk(req, escaped, HTTPD_RESP_USE_STRLEN) :
+            httpd_resp_send_chunk(req, p, 1);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    return ESP_OK;
+}
+
+static esp_err_t redirect_to_root(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", "/");
+    return httpd_resp_sendstr(req, "");
+}
+
+static void generate_device_secret(uint8_t out_secret[RIBOSOME_DEVICE_SECRET_LEN])
+{
+    bool any_nonzero = false;
+
+    for (size_t i = 0; i < RIBOSOME_DEVICE_SECRET_LEN; i += sizeof(uint32_t)) {
+        uint32_t r = esp_random();
+        size_t copy_len = RIBOSOME_DEVICE_SECRET_LEN - i;
+        if (copy_len > sizeof(r)) {
+            copy_len = sizeof(r);
+        }
+        memcpy(&out_secret[i], &r, copy_len);
+    }
+
+    for (size_t i = 0; i < RIBOSOME_DEVICE_SECRET_LEN; ++i) {
+        any_nonzero = any_nonzero || out_secret[i] != 0;
+    }
+    if (!any_nonzero) {
+        out_secret[0] = 1;
+    }
+}
+
+static ribosome_table_entry_t *find_ribosome_entry(
+    ribosome_table_t *table,
+    const char *mqtt_client_id
+)
+{
+    if (!table || table->count > RIBOSOME_MAX_ENTRIES || !mqtt_client_id) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < table->count; ++i) {
+        if (strncmp(
+                table->entries[i].mqtt_client_id,
+                mqtt_client_id,
+                RIBOSOME_MQTT_CLIENT_ID_LEN
+            ) == 0) {
+            return &table->entries[i];
+        }
+    }
+
+    return NULL;
+}
+
+static esp_err_t render_seen_devices(httpd_req_t *req, const ribosome_table_t *ribosomes)
+{
+    admin_seen_client_t snapshot[ADMIN_SEEN_CLIENTS_MAX];
+    memset(snapshot, 0, sizeof(snapshot));
+
+    portENTER_CRITICAL(&s_seen_lock);
+    memcpy(snapshot, s_seen_clients, sizeof(snapshot));
+    portEXIT_CRITICAL(&s_seen_lock);
+
+    esp_err_t err = send_chunkf(
+        req,
+        "<h2>Dispositivos detectados no broker</h2>"
+        "<table><thead><tr><th>MQTT client id</th><th>Status</th><th>Vistos</th><th>Ação</th></tr></thead><tbody>"
+    );
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    bool any = false;
+    for (size_t i = 0; i < ADMIN_SEEN_CLIENTS_MAX; ++i) {
+        if (!snapshot[i].in_use) {
+            continue;
+        }
+        any = true;
+        bool registered = ribosome_table_entry_exists(ribosomes, snapshot[i].client_id);
+
+        err = send_chunkf(req, "<tr><td><code>");
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = send_escaped(req, snapshot[i].client_id);
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = send_chunkf(
+            req,
+            "</code></td><td>%s</td><td>%lu</td><td>",
+            registered ? "cadastrado" : "pendente",
+            (unsigned long)snapshot[i].seen_count
+        );
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        if (!registered) {
+            err = send_chunkf(
+                req,
+                "<form class='inline' method='POST' action='/ribosome/provision'>"
+                "<input type='hidden' name='mqtt_client_id' value='"
+            );
+            if (err != ESP_OK) {
+                return err;
+            }
+            err = send_escaped(req, snapshot[i].client_id);
+            if (err != ESP_OK) {
+                return err;
+            }
+            err = send_chunkf(
+                req,
+                "'><input name='template_id' type='number' min='1' value='1'>"
+                "<input name='epoch' type='number' min='1' value='1'>"
+                "<button type='submit'>Autorizar</button></form>"
+            );
+        } else {
+            err = send_chunkf(req, "<span class='muted'>pronto</span>");
+        }
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = send_chunkf(req, "</td></tr>");
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    if (!any) {
+        err = send_chunkf(
+            req,
+            "<tr><td colspan='4' class='muted'>Nenhum cliente MQTT visto ainda.</td></tr>"
+        );
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    return send_chunkf(req, "</tbody></table>");
+}
+
+static esp_err_t render_ribosomes(httpd_req_t *req, const ribosome_table_t *table)
+{
+    esp_err_t err = send_chunkf(
+        req,
+        "<h2>Ribosomes cadastrados</h2>"
+        "<table><thead><tr><th>MQTT client id</th><th>RNA</th><th>Epoch</th><th>Device secret</th><th>Ações</th></tr></thead><tbody>"
+    );
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (!table || table->count == 0 || table->count > RIBOSOME_MAX_ENTRIES) {
+        err = send_chunkf(
+            req,
+            "<tr><td colspan='5' class='muted'>Nenhum dispositivo cadastrado.</td></tr>"
+        );
+        if (err != ESP_OK) {
+            return err;
+        }
+        return send_chunkf(req, "</tbody></table>");
+    }
+
+    for (size_t i = 0; i < table->count; ++i) {
+        char secret_hex[ADMIN_DEVICE_SECRET_HEX_LEN + 1] = {0};
+        hex_encode(
+            table->entries[i].device_secret,
+            sizeof(table->entries[i].device_secret),
+            secret_hex,
+            sizeof(secret_hex)
+        );
+
+        err = send_chunkf(req, "<tr><td><code>");
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = send_escaped(req, table->entries[i].mqtt_client_id);
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = send_chunkf(
+            req,
+            "</code></td><td>%u</td><td>%lu</td><td><code class='secret'>%s</code></td><td>",
+            (unsigned)table->entries[i].template_id,
+            (unsigned long)table->entries[i].epoch,
+            secret_hex
+        );
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        err = send_chunkf(
+            req,
+            "<form class='inline' method='POST' action='/ribosome/regenerate' "
+            "onsubmit=\"return confirm('Regenerar o device_secret deste dispositivo? O app precisara usar o novo valor.');\">"
+            "<input type='hidden' name='mqtt_client_id' value='"
+        );
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = send_escaped(req, table->entries[i].mqtt_client_id);
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = send_chunkf(
+            req,
+            "'><button type='submit'>Regenerar secret</button></form>"
+            "<form class='inline' method='POST' action='/ribosome/remove' "
+            "onsubmit=\"return confirm('Remover este dispositivo?');\">"
+            "<input type='hidden' name='mqtt_client_id' value='"
+        );
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = send_escaped(req, table->entries[i].mqtt_client_id);
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = send_chunkf(req, "'><button class='danger' type='submit'>Remover</button></form></td></tr>");
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    return send_chunkf(req, "</tbody></table>");
+}
+
+static esp_err_t render_templates(httpd_req_t *req, const rna_template_table_t *templates)
+{
+    esp_err_t err = send_chunkf(
+        req,
+        "<h2>RNA disponível</h2>"
+        "<table><thead><tr><th>ID</th><th>Nome</th><th>Amino acids</th></tr></thead><tbody>"
+    );
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (!templates || templates->count == 0 || templates->count > RNA_MAX_TEMPLATES) {
+        err = send_chunkf(req, "<tr><td colspan='3' class='muted'>Nenhum RNA carregado.</td></tr>");
+        if (err != ESP_OK) {
+            return err;
+        }
+        return send_chunkf(req, "</tbody></table>");
+    }
+
+    for (size_t i = 0; i < templates->count; ++i) {
+        const rna_template_t *tpl = &templates->templates[i];
+        err = send_chunkf(req, "<tr><td>%u</td><td>", (unsigned)tpl->id);
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = send_escaped(req, tpl->name);
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = send_chunkf(req, "</td><td>");
+        if (err != ESP_OK) {
+            return err;
+        }
+        for (size_t j = 0; j < tpl->amino_count; ++j) {
+            err = send_chunkf(
+                req,
+                "%s%u",
+                j == 0 ? "" : ",",
+                (unsigned)tpl->aminos[j]
+            );
+            if (err != ESP_OK) {
+                return err;
+            }
+        }
+        err = send_chunkf(req, "</td></tr>");
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    return send_chunkf(req, "</tbody></table>");
+}
+
+static esp_err_t render_maintenance_page(httpd_req_t *req)
+{
+    ribosome_table_t *ribosomes = (ribosome_table_t *)calloc(1, sizeof(*ribosomes));
+    rna_template_table_t *templates = (rna_template_table_t *)calloc(1, sizeof(*templates));
+    if (!ribosomes || !templates) {
+        free(ribosomes);
+        free(templates);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "admin mem failed");
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = ribosome_store_load_or_init(ribosomes);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "ribosome load failed");
+        goto done;
+    }
+
+    err = rna_membrane_load_or_init(templates);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "rna load failed");
+        goto done;
+    }
+
+    httpd_resp_set_type(req, "text/html");
+    err = send_chunkf(
+        req,
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>BlindNet Admin</title><style>"
+        "body{font-family:Arial,sans-serif;background:#101418;color:#f2f2f2;margin:0;padding:20px;}"
+        ".wrap{max-width:1120px;margin:auto;}.panel{background:#181f26;padding:16px;border-radius:8px;margin:0 0 16px;}"
+        "h1{font-size:22px;margin:0 0 12px;}h2{font-size:16px;margin:0 0 12px;}"
+        "table{width:100%;border-collapse:collapse;margin:8px 0 0;}th,td{border-bottom:1px solid #2b3540;padding:8px;text-align:left;vertical-align:top;}"
+        "th{color:#b8c7d7;font-size:12px;text-transform:uppercase;}code{word-break:break-all;color:#b8d7ff;}"
+        ".secret{font-size:11px}.muted{color:#8fa0ad;font-size:13px}.hint{color:#9aa4ad;font-size:12px;line-height:1.4;}"
+        "label{display:block;margin-top:10px;font-size:13px;color:#cbd5df;}input{box-sizing:border-box;padding:9px;border-radius:6px;border:1px solid #334;background:#0c1117;color:#fff;}"
+        "form.inline{display:inline-flex;gap:6px;align-items:center;margin:2px 4px 2px 0;}form.inline input{width:76px;}"
+        "button{padding:9px 11px;border:0;border-radius:6px;background:#2d7dff;color:#fff;font-weight:bold;cursor:pointer;}button.danger{background:#a33b3b;}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;}"
+        ".full input{width:100%;margin-top:5px;}.full button{width:100%;margin-top:14px;}"
+        "</style></head><body><main class='wrap'><h1>BlindNet Admin</h1>"
+        "<p class='hint'>Janela administrativa desbloqueada temporariamente. O device_secret fica visivel aqui para o app criptografar o active_substance.</p>"
+    );
+    if (err != ESP_OK) {
+        goto done;
+    }
+
+    err = send_chunkf(req, "<section class='panel'>");
+    if (err == ESP_OK) {
+        err = render_seen_devices(req, ribosomes);
+    }
+    if (err == ESP_OK) {
+        err = send_chunkf(req, "</section><section class='panel'>");
+    }
+    if (err == ESP_OK) {
+        err = render_ribosomes(req, ribosomes);
+    }
+    if (err == ESP_OK) {
+        err = send_chunkf(req, "</section><section class='panel'>");
+    }
+    if (err == ESP_OK) {
+        err = render_templates(req, templates);
+    }
+    if (err == ESP_OK) {
+        err = send_chunkf(
+            req,
+            "</section><section class='grid'>"
+            "<div class='panel full'><h2>Criar/alterar RNA</h2>"
+            "<form method='POST' action='/membrane/template/set'>"
+            "<label>Template id</label><input name='template_id' type='number' min='1' value='100' required>"
+            "<label>Nome do template</label><input name='template_name' maxlength='31' value='DEVICE_CUSTOM' required>"
+            "<label>Amino acids permitidos</label><input name='amino_ids' maxlength='48' value='1,2,7,8' required>"
+            "<button type='submit'>Salvar RNA</button></form>"
+            "<p class='hint'>1 ON, 2 OFF, 3 OPEN, 4 CLOSE, 5 SET_SPEED, 6 SET_LEVEL, 7 READ_STATE, 8 TOGGLE, 9 LOCK, 10 UNLOCK, 11 SET_TEMPERATURE, 12 SET_MODE.</p></div>"
+            "<div class='panel full'><h2>Cadastrar manualmente</h2>"
+            "<form method='POST' action='/ribosome/add'>"
+            "<label>MQTT client id</label><input name='mqtt_client_id' maxlength='32' required>"
+            "<label>Template id</label><input name='template_id' type='number' min='1' value='1' required>"
+            "<label>Epoch</label><input name='epoch' type='number' min='0' value='1' required>"
+            "<label>Device secret hex (32 bytes)</label><input name='device_secret_hex' maxlength='64' required>"
+            "<button type='submit'>Cadastrar ribosome</button></form></div>"
+            "<div class='panel full'><h2>Aplicar RNA ao dispositivo</h2>"
+            "<form method='POST' action='/device/membrane/set'>"
+            "<label>MQTT client id</label><input name='mqtt_client_id' maxlength='32' required>"
+            "<label>Template id</label><input name='template_id' type='number' min='1' value='100' required>"
+            "<label>Nome do template</label><input name='template_name' maxlength='31' value='DEVICE_CUSTOM' required>"
+            "<label>Amino acids permitidos</label><input name='amino_ids' maxlength='48' value='1,2,7,8' required>"
+            "<button type='submit'>Aplicar</button></form></div>"
+            "</section></main></body></html>"
+        );
+    }
+    if (err == ESP_OK) {
+        err = httpd_resp_send_chunk(req, NULL, 0);
+    }
+
+done:
+    mbedtls_platform_zeroize(ribosomes, sizeof(*ribosomes));
+    mbedtls_platform_zeroize(templates, sizeof(*templates));
+    free(ribosomes);
+    free(templates);
+    return err;
+}
+
+static void admin_server_clear_runtime_state(void)
+{
+    s_server = NULL;
+    s_running = false;
+    s_unlocked = false;
+    s_challenge_valid = false;
+    s_on_window_closed = NULL;
+    s_window_ctx = NULL;
+    mbedtls_platform_zeroize(s_challenge, sizeof(s_challenge));
+}
+
+static esp_err_t admin_server_stop_internal(bool notify_window_closed)
+{
+    if (!s_server) {
+        admin_server_clear_runtime_state();
+        return ESP_OK;
+    }
+
+    if (s_window_timer) {
+        (void)esp_timer_stop(s_window_timer);
+    }
+
+    httpd_handle_t server = s_server;
+    bool was_maintenance = s_mode == ADMIN_SERVER_MODE_MAINTENANCE;
+    void (*on_window_closed)(void *ctx) = s_on_window_closed;
+    void *window_ctx = s_window_ctx;
+
+    s_unlocked = false;
+    s_challenge_valid = false;
+    mbedtls_platform_zeroize(s_challenge, sizeof(s_challenge));
+
+    ESP_LOGW(TAG, "parando admin_server e liberando porta 80");
+
+    esp_err_t err = httpd_stop(server);
+    if (err == ESP_OK) {
+        admin_server_clear_runtime_state();
+    } else {
+        ESP_LOGE(TAG, "httpd_stop falhou: %s", esp_err_to_name(err));
+        s_on_window_closed = NULL;
+        s_window_ctx = NULL;
+    }
+
+    if (notify_window_closed && was_maintenance && on_window_closed) {
+        on_window_closed(window_ctx);
+    }
+
+    return err;
+}
+
+static esp_err_t admin_server_force_release_port80(void)
+{
+    if (!s_server && !s_running) {
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "forcando limpeza do HTTP admin antes de abrir janela");
+    esp_err_t err = admin_server_stop_internal(false);
+    vTaskDelay(pdMS_TO_TICKS(ADMIN_HTTPD_FORCE_STOP_DELAY_MS));
+    return err;
+}
+
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -733,7 +1279,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         if (!s_unlocked) {
             return httpd_resp_send(req, MAINTENANCE_LOCKED_PAGE, HTTPD_RESP_USE_STRLEN);
         }
-        return httpd_resp_send(req, MAINTENANCE_PAGE, HTTPD_RESP_USE_STRLEN);
+        return render_maintenance_page(req);
     }
     return httpd_resp_send(req, HTML_PAGE, HTTPD_RESP_USE_STRLEN);
 }
@@ -851,12 +1397,15 @@ static esp_err_t ribosome_add_post_handler(httpd_req_t *req)
     char epoch_text[16] = {0};
     char secret_hex[ADMIN_DEVICE_SECRET_HEX_LEN + 1] = {0};
     uint8_t device_secret[RIBOSOME_DEVICE_SECRET_LEN] = {0};
-    ribosome_table_t table;
-    rna_template_table_t templates;
-    mbedtls_platform_zeroize(&table, sizeof(table));
-    mbedtls_platform_zeroize(&templates, sizeof(templates));
+    ribosome_table_t *table = (ribosome_table_t *)calloc(1, sizeof(*table));
+    rna_template_table_t *templates = (rna_template_table_t *)calloc(1, sizeof(*templates));
 
     esp_err_t result = ESP_FAIL;
+    if (!table || !templates) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "admin mem failed");
+        result = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
 
     if (s_mode != ADMIN_SERVER_MODE_MAINTENANCE) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not available");
@@ -886,14 +1435,14 @@ static esp_err_t ribosome_add_post_handler(httpd_req_t *req)
         goto cleanup;
     }
 
-    result = rna_membrane_load_or_init(&templates);
+    result = rna_membrane_load_or_init(templates);
     if (result != ESP_OK ||
-        !rna_template_table_find(&templates, (rna_template_id_t)template_id)) {
+        !rna_template_table_find(templates, (rna_template_id_t)template_id)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "template not found");
         goto cleanup;
     }
 
-    result = ribosome_store_load_or_init(&table);
+    result = ribosome_store_load_or_init(table);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load failed");
         goto cleanup;
@@ -906,13 +1455,13 @@ static esp_err_t ribosome_add_post_handler(httpd_req_t *req)
         .device_secret = device_secret,
     };
 
-    result = ribosome_table_add_from_config(&table, &entry_config);
+    result = ribosome_table_add_from_config(table, &entry_config);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "add failed");
         goto cleanup;
     }
 
-    result = ribosome_store_save(&table);
+    result = ribosome_store_save(table);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save failed");
         goto cleanup;
@@ -928,8 +1477,175 @@ cleanup:
     mbedtls_platform_zeroize(epoch_text, sizeof(epoch_text));
     mbedtls_platform_zeroize(secret_hex, sizeof(secret_hex));
     mbedtls_platform_zeroize(device_secret, sizeof(device_secret));
-    mbedtls_platform_zeroize(&table, sizeof(table));
-    mbedtls_platform_zeroize(&templates, sizeof(templates));
+    if (table) {
+        mbedtls_platform_zeroize(table, sizeof(*table));
+        free(table);
+    }
+    if (templates) {
+        mbedtls_platform_zeroize(templates, sizeof(*templates));
+        free(templates);
+    }
+    return result;
+}
+
+static esp_err_t ribosome_provision_post_handler(httpd_req_t *req)
+{
+    char body[ADMIN_POST_BUF_SIZE] = {0};
+    char mqtt_client_id[RIBOSOME_MQTT_CLIENT_ID_LEN] = {0};
+    char template_text[16] = {0};
+    char epoch_text[16] = {0};
+    uint8_t device_secret[RIBOSOME_DEVICE_SECRET_LEN] = {0};
+    ribosome_table_t *table = (ribosome_table_t *)calloc(1, sizeof(*table));
+    rna_template_table_t *templates = (rna_template_table_t *)calloc(1, sizeof(*templates));
+
+    esp_err_t result = ESP_FAIL;
+    if (!table || !templates) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "admin mem failed");
+        result = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+
+    if (s_mode != ADMIN_SERVER_MODE_MAINTENANCE) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not available");
+        goto cleanup;
+    }
+
+    if (!s_unlocked) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "locked");
+        goto cleanup;
+    }
+
+    if (read_request_body(req, body, sizeof(body)) != ESP_OK ||
+        !form_get_value(body, "mqtt_client_id", mqtt_client_id, sizeof(mqtt_client_id)) ||
+        !form_get_value(body, "template_id", template_text, sizeof(template_text)) ||
+        !form_get_value(body, "epoch", epoch_text, sizeof(epoch_text))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body");
+        goto cleanup;
+    }
+
+    uint32_t template_id = 0;
+    uint32_t epoch = 0;
+    if (!parse_u32_field(template_text, &template_id) ||
+        !parse_u32_field(epoch_text, &epoch) ||
+        template_id > UINT16_MAX ||
+        epoch == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid fields");
+        goto cleanup;
+    }
+
+    result = rna_membrane_load_or_init(templates);
+    if (result != ESP_OK ||
+        !rna_template_table_find(templates, (rna_template_id_t)template_id)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "template not found");
+        goto cleanup;
+    }
+
+    result = ribosome_store_load_or_init(table);
+    if (result != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load failed");
+        goto cleanup;
+    }
+
+    generate_device_secret(device_secret);
+
+    ribosome_entry_config_t entry_config = {
+        .mqtt_client_id = mqtt_client_id,
+        .template_id = (rna_template_id_t)template_id,
+        .epoch = epoch,
+        .device_secret = device_secret,
+    };
+
+    result = ribosome_table_add_from_config(table, &entry_config);
+    if (result != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "add failed");
+        goto cleanup;
+    }
+
+    result = ribosome_store_save(table);
+    if (result != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save failed");
+        goto cleanup;
+    }
+
+    result = redirect_to_root(req);
+
+cleanup:
+    mbedtls_platform_zeroize(body, sizeof(body));
+    mbedtls_platform_zeroize(mqtt_client_id, sizeof(mqtt_client_id));
+    mbedtls_platform_zeroize(template_text, sizeof(template_text));
+    mbedtls_platform_zeroize(epoch_text, sizeof(epoch_text));
+    mbedtls_platform_zeroize(device_secret, sizeof(device_secret));
+    if (table) {
+        mbedtls_platform_zeroize(table, sizeof(*table));
+        free(table);
+    }
+    if (templates) {
+        mbedtls_platform_zeroize(templates, sizeof(*templates));
+        free(templates);
+    }
+    return result;
+}
+
+static esp_err_t ribosome_regenerate_post_handler(httpd_req_t *req)
+{
+    char body[ADMIN_POST_BUF_SIZE] = {0};
+    char mqtt_client_id[RIBOSOME_MQTT_CLIENT_ID_LEN] = {0};
+    ribosome_table_t *table = (ribosome_table_t *)calloc(1, sizeof(*table));
+
+    esp_err_t result = ESP_FAIL;
+    if (!table) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "admin mem failed");
+        result = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+
+    if (s_mode != ADMIN_SERVER_MODE_MAINTENANCE) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not available");
+        goto cleanup;
+    }
+
+    if (!s_unlocked) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "locked");
+        goto cleanup;
+    }
+
+    if (read_request_body(req, body, sizeof(body)) != ESP_OK ||
+        !form_get_value(body, "mqtt_client_id", mqtt_client_id, sizeof(mqtt_client_id))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body");
+        goto cleanup;
+    }
+
+    result = ribosome_store_load_or_init(table);
+    if (result != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load failed");
+        goto cleanup;
+    }
+
+    ribosome_table_entry_t *entry = find_ribosome_entry(table, mqtt_client_id);
+    if (!entry) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "device not found");
+        result = ESP_ERR_NOT_FOUND;
+        goto cleanup;
+    }
+
+    generate_device_secret(entry->device_secret);
+    entry->epoch = entry->epoch == UINT32_MAX ? 1 : entry->epoch + 1;
+
+    result = ribosome_store_save(table);
+    if (result != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save failed");
+        goto cleanup;
+    }
+
+    result = redirect_to_root(req);
+
+cleanup:
+    mbedtls_platform_zeroize(body, sizeof(body));
+    mbedtls_platform_zeroize(mqtt_client_id, sizeof(mqtt_client_id));
+    if (table) {
+        mbedtls_platform_zeroize(table, sizeof(*table));
+        free(table);
+    }
     return result;
 }
 
@@ -940,11 +1656,15 @@ static esp_err_t membrane_template_set_post_handler(httpd_req_t *req)
     char template_name[RNA_TEMPLATE_NAME_LEN] = {0};
     char amino_text[64] = {0};
     rna_template_t template_rule;
-    rna_template_table_t templates;
+    rna_template_table_t *templates = (rna_template_table_t *)calloc(1, sizeof(*templates));
     mbedtls_platform_zeroize(&template_rule, sizeof(template_rule));
-    mbedtls_platform_zeroize(&templates, sizeof(templates));
 
     esp_err_t result = ESP_FAIL;
+    if (!templates) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "admin mem failed");
+        result = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
 
     if (s_mode != ADMIN_SERVER_MODE_MAINTENANCE) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not available");
@@ -975,19 +1695,19 @@ static esp_err_t membrane_template_set_post_handler(httpd_req_t *req)
         goto cleanup;
     }
 
-    result = rna_membrane_load_or_init(&templates);
+    result = rna_membrane_load_or_init(templates);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load failed");
         goto cleanup;
     }
 
-    result = rna_template_table_upsert(&templates, &template_rule);
+    result = rna_template_table_upsert(templates, &template_rule);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "template rejected");
         goto cleanup;
     }
 
-    result = rna_membrane_save(&templates);
+    result = rna_membrane_save(templates);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save failed");
         goto cleanup;
@@ -1002,7 +1722,10 @@ cleanup:
     mbedtls_platform_zeroize(template_name, sizeof(template_name));
     mbedtls_platform_zeroize(amino_text, sizeof(amino_text));
     mbedtls_platform_zeroize(&template_rule, sizeof(template_rule));
-    mbedtls_platform_zeroize(&templates, sizeof(templates));
+    if (templates) {
+        mbedtls_platform_zeroize(templates, sizeof(*templates));
+        free(templates);
+    }
     return result;
 }
 
@@ -1014,13 +1737,16 @@ static esp_err_t device_membrane_set_post_handler(httpd_req_t *req)
     char template_name[RNA_TEMPLATE_NAME_LEN] = {0};
     char amino_text[64] = {0};
     rna_template_t template_rule;
-    rna_template_table_t templates;
-    ribosome_table_t table;
+    rna_template_table_t *templates = (rna_template_table_t *)calloc(1, sizeof(*templates));
+    ribosome_table_t *table = (ribosome_table_t *)calloc(1, sizeof(*table));
     mbedtls_platform_zeroize(&template_rule, sizeof(template_rule));
-    mbedtls_platform_zeroize(&templates, sizeof(templates));
-    mbedtls_platform_zeroize(&table, sizeof(table));
 
     esp_err_t result = ESP_FAIL;
+    if (!templates || !table) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "admin mem failed");
+        result = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
 
     if (s_mode != ADMIN_SERVER_MODE_MAINTENANCE) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not available");
@@ -1052,26 +1778,26 @@ static esp_err_t device_membrane_set_post_handler(httpd_req_t *req)
         goto cleanup;
     }
 
-    result = ribosome_store_load_or_init(&table);
+    result = ribosome_store_load_or_init(table);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "device load failed");
         goto cleanup;
     }
 
-    result = rna_membrane_load_or_init(&templates);
+    result = rna_membrane_load_or_init(templates);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "template load failed");
         goto cleanup;
     }
 
-    result = rna_template_table_upsert(&templates, &template_rule);
+    result = rna_template_table_upsert(templates, &template_rule);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "template rejected");
         goto cleanup;
     }
 
     result = ribosome_assign_template(
-        &table,
+        table,
         mqtt_client_id,
         template_rule.id
     );
@@ -1080,13 +1806,13 @@ static esp_err_t device_membrane_set_post_handler(httpd_req_t *req)
         goto cleanup;
     }
 
-    result = rna_membrane_save(&templates);
+    result = rna_membrane_save(templates);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "template save failed");
         goto cleanup;
     }
 
-    result = ribosome_store_save(&table);
+    result = ribosome_store_save(table);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "device save failed");
         goto cleanup;
@@ -1102,8 +1828,14 @@ cleanup:
     mbedtls_platform_zeroize(template_name, sizeof(template_name));
     mbedtls_platform_zeroize(amino_text, sizeof(amino_text));
     mbedtls_platform_zeroize(&template_rule, sizeof(template_rule));
-    mbedtls_platform_zeroize(&templates, sizeof(templates));
-    mbedtls_platform_zeroize(&table, sizeof(table));
+    if (templates) {
+        mbedtls_platform_zeroize(templates, sizeof(*templates));
+        free(templates);
+    }
+    if (table) {
+        mbedtls_platform_zeroize(table, sizeof(*table));
+        free(table);
+    }
     return result;
 }
 
@@ -1111,10 +1843,14 @@ static esp_err_t ribosome_remove_post_handler(httpd_req_t *req)
 {
     char body[ADMIN_POST_BUF_SIZE] = {0};
     char mqtt_client_id[RIBOSOME_MQTT_CLIENT_ID_LEN] = {0};
-    ribosome_table_t table;
-    mbedtls_platform_zeroize(&table, sizeof(table));
+    ribosome_table_t *table = (ribosome_table_t *)calloc(1, sizeof(*table));
 
     esp_err_t result = ESP_FAIL;
+    if (!table) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "admin mem failed");
+        result = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
 
     if (s_mode != ADMIN_SERVER_MODE_MAINTENANCE) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not available");
@@ -1132,19 +1868,19 @@ static esp_err_t ribosome_remove_post_handler(httpd_req_t *req)
         goto cleanup;
     }
 
-    result = ribosome_store_load_or_init(&table);
+    result = ribosome_store_load_or_init(table);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "load failed");
         goto cleanup;
     }
 
-    result = ribosome_table_remove_entry(&table, mqtt_client_id);
+    result = ribosome_table_remove_entry(table, mqtt_client_id);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "remove failed");
         goto cleanup;
     }
 
-    result = ribosome_store_save(&table);
+    result = ribosome_store_save(table);
     if (result != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save failed");
         goto cleanup;
@@ -1156,7 +1892,10 @@ static esp_err_t ribosome_remove_post_handler(httpd_req_t *req)
 cleanup:
     mbedtls_platform_zeroize(body, sizeof(body));
     mbedtls_platform_zeroize(mqtt_client_id, sizeof(mqtt_client_id));
-    mbedtls_platform_zeroize(&table, sizeof(table));
+    if (table) {
+        mbedtls_platform_zeroize(table, sizeof(*table));
+        free(table);
+    }
     return result;
 }
 
@@ -1348,15 +2087,34 @@ esp_err_t admin_server_start(const admin_server_config_t *config)
      * Mantém o servidor pequeno.
      */
     http_config.server_port = 80;
-    http_config.max_uri_handlers = 8;
+    http_config.max_uri_handlers = 10;
     http_config.max_open_sockets = 2;
-    http_config.stack_size = 8192;
+    http_config.stack_size = s_mode == ADMIN_SERVER_MODE_BOOTSTRAP ?
+        ADMIN_HTTPD_BOOTSTRAP_STACK_SIZE :
+        ADMIN_HTTPD_STACK_SIZE;
     http_config.lru_purge_enable = true;
 
-    esp_err_t err = httpd_start(&s_server, &http_config);
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < ADMIN_HTTPD_START_RETRIES; ++attempt) {
+        err = httpd_start(&s_server, &http_config);
+        if (err == ESP_OK) {
+            break;
+        }
+
+        s_server = NULL;
+        ESP_LOGW(
+            TAG,
+            "httpd_start falhou tentativa=%d/%d: %s",
+            attempt + 1,
+            ADMIN_HTTPD_START_RETRIES,
+            esp_err_to_name(err)
+        );
+        vTaskDelay(pdMS_TO_TICKS(ADMIN_HTTPD_START_RETRY_DELAY_MS));
+    }
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start falhou: %s", esp_err_to_name(err));
+        admin_server_clear_runtime_state();
         return err;
     }
 
@@ -1395,6 +2153,20 @@ esp_err_t admin_server_start(const admin_server_config_t *config)
         .user_ctx = NULL
     };
 
+    httpd_uri_t ribosome_provision_uri = {
+        .uri = "/ribosome/provision",
+        .method = HTTP_POST,
+        .handler = ribosome_provision_post_handler,
+        .user_ctx = NULL
+    };
+
+    httpd_uri_t ribosome_regenerate_uri = {
+        .uri = "/ribosome/regenerate",
+        .method = HTTP_POST,
+        .handler = ribosome_regenerate_post_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t ribosome_remove_uri = {
         .uri = "/ribosome/remove",
         .method = HTTP_POST,
@@ -1421,6 +2193,8 @@ esp_err_t admin_server_start(const admin_server_config_t *config)
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &challenge_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &unlock_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &ribosome_add_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &ribosome_provision_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &ribosome_regenerate_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &ribosome_remove_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &membrane_template_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &device_membrane_uri));
@@ -1444,20 +2218,14 @@ esp_err_t admin_server_open_window(const admin_server_config_t *config, uint32_t
         .ctx = config ? config->ctx : NULL,
     };
 
-    if (s_running && s_mode != ADMIN_SERVER_MODE_MAINTENANCE) {
-        return ESP_ERR_INVALID_STATE;
+    esp_err_t err = admin_server_force_release_port80();
+    if (err != ESP_OK) {
+        return err;
     }
 
-    if (!s_running) {
-        esp_err_t err = admin_server_start(&window_config);
-        if (err != ESP_OK) {
-            return err;
-        }
-    } else {
-        s_unlocked = false;
-        s_on_window_closed = window_config.on_window_closed;
-        s_window_ctx = window_config.ctx;
-        generate_challenge();
+    err = admin_server_start(&window_config);
+    if (err != ESP_OK) {
+        return err;
     }
 
     if (timeout_ms == 0) {
@@ -1470,35 +2238,7 @@ esp_err_t admin_server_open_window(const admin_server_config_t *config, uint32_t
 
 esp_err_t admin_server_stop(void)
 {
-    if (!s_running || !s_server) {
-        return ESP_OK;
-    }
-
-    if (s_window_timer) {
-        (void)esp_timer_stop(s_window_timer);
-    }
-
-    httpd_handle_t server = s_server;
-    bool was_maintenance = s_mode == ADMIN_SERVER_MODE_MAINTENANCE;
-    void (*on_window_closed)(void *ctx) = s_on_window_closed;
-    void *window_ctx = s_window_ctx;
-
-    s_server = NULL;
-    s_running = false;
-    s_unlocked = false;
-    s_challenge_valid = false;
-    s_on_window_closed = NULL;
-    s_window_ctx = NULL;
-    mbedtls_platform_zeroize(s_challenge, sizeof(s_challenge));
-
-    ESP_LOGW(TAG, "parando admin_server e liberando recursos");
-
-    esp_err_t err = httpd_stop(server);
-    if (was_maintenance && on_window_closed) {
-        on_window_closed(window_ctx);
-    }
-
-    return err;
+    return admin_server_stop_internal(true);
 }
 
 bool admin_server_is_running(void)

@@ -23,6 +23,9 @@ static const char *TAG = "g2g_ble";
 #define G2G_ATT_MTU 247
 #define G2G_TX_TASK_STACK 3072
 #define G2G_TX_TASK_PRIO 5
+#define G2G_RX_TASK_STACK 8192
+#define G2G_RX_TASK_PRIO 6
+#define G2G_RX_QUEUE_LEN 4
 #define G2G_CONN_TIMEOUT_MS 7000
 
 #ifndef BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN
@@ -103,8 +106,10 @@ static uint8_t s_own_addr_type;
 
 static g2g_peer_t s_peers[G2G_BLE_MAX_PEERS];
 static QueueHandle_t s_tx_queue;
+static QueueHandle_t s_rx_queue;
 static SemaphoreHandle_t s_tx_done;
 static TaskHandle_t s_tx_task;
+static TaskHandle_t s_rx_task;
 static TaskHandle_t s_host_task;
 static g2g_tx_ctx_t s_tx;
 
@@ -489,6 +494,25 @@ static void tx_task(void *arg)
     vTaskDelete(NULL);
 }
 
+static void rx_task(void *arg)
+{
+    (void)arg;
+
+    while (s_running) {
+        g2g_fragment_t fragment;
+        if (xQueueReceive(s_rx_queue, &fragment, pdMS_TO_TICKS(250)) != pdTRUE) {
+            continue;
+        }
+
+        if (s_config.on_fragment) {
+            s_config.on_fragment(fragment.bytes, fragment.len, s_config.ctx);
+        }
+    }
+
+    s_rx_task = NULL;
+    vTaskDelete(NULL);
+}
+
 static int rx_access_cb(
     uint16_t conn_handle,
     uint16_t attr_handle,
@@ -511,8 +535,15 @@ static int rx_access_cb(
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
 
-    uint8_t fragment[G2G_BLE_FRAGMENT_MAX_LEN];
-    if (os_mbuf_copydata(ctxt->om, 0, len, fragment) != 0) {
+    if (!s_rx_queue) {
+        stats_inc(&s_stats.rx_errors);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    g2g_fragment_t fragment;
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.len = len;
+    if (os_mbuf_copydata(ctxt->om, 0, len, fragment.bytes) != 0) {
         stats_inc(&s_stats.rx_errors);
         ESP_LOGW(TAG, "RX copydata falhou len=%u", (unsigned)len);
         return BLE_ATT_ERR_UNLIKELY;
@@ -520,8 +551,10 @@ static int rx_access_cb(
 
     stats_inc(&s_stats.rx_fragments);
     ESP_LOGI(TAG, "RX fragment len=%u", (unsigned)len);
-    if (s_config.on_fragment) {
-        s_config.on_fragment(fragment, len, s_config.ctx);
+    if (xQueueSend(s_rx_queue, &fragment, 0) != pdTRUE) {
+        stats_inc(&s_stats.rx_errors);
+        ESP_LOGW(TAG, "fila RX G2G cheia, descartando fragmento len=%u", (unsigned)len);
+        return BLE_ATT_ERR_UNLIKELY;
     }
 
     return 0;
@@ -640,8 +673,21 @@ esp_err_t g2g_ble_start(const g2g_ble_config_t *config)
     memset(&s_tx, 0, sizeof(s_tx));
 
     s_tx_queue = xQueueCreate(G2G_BLE_TX_QUEUE_LEN, sizeof(g2g_fragment_t));
+    s_rx_queue = xQueueCreate(G2G_RX_QUEUE_LEN, sizeof(g2g_fragment_t));
     s_tx_done = xSemaphoreCreateBinary();
-    if (!s_tx_queue || !s_tx_done) {
+    if (!s_tx_queue || !s_rx_queue || !s_tx_done) {
+        if (s_tx_queue) {
+            vQueueDelete(s_tx_queue);
+            s_tx_queue = NULL;
+        }
+        if (s_rx_queue) {
+            vQueueDelete(s_rx_queue);
+            s_rx_queue = NULL;
+        }
+        if (s_tx_done) {
+            vSemaphoreDelete(s_tx_done);
+            s_tx_done = NULL;
+        }
         return ESP_ERR_NO_MEM;
     }
 
@@ -673,6 +719,27 @@ esp_err_t g2g_ble_start(const g2g_ble_config_t *config)
                     G2G_TX_TASK_PRIO, &s_tx_task) != pdPASS) {
         s_running = false;
         nimble_port_deinit();
+        vQueueDelete(s_tx_queue);
+        s_tx_queue = NULL;
+        vQueueDelete(s_rx_queue);
+        s_rx_queue = NULL;
+        vSemaphoreDelete(s_tx_done);
+        s_tx_done = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (xTaskCreate(rx_task, "g2g_ble_rx", G2G_RX_TASK_STACK, NULL,
+                    G2G_RX_TASK_PRIO, &s_rx_task) != pdPASS) {
+        ESP_LOGE(TAG, "falha ao criar g2g_ble_rx stack=%u", (unsigned)G2G_RX_TASK_STACK);
+        s_running = false;
+        nimble_port_deinit();
+        vTaskDelay(pdMS_TO_TICKS(300));
+        vQueueDelete(s_tx_queue);
+        s_tx_queue = NULL;
+        vQueueDelete(s_rx_queue);
+        s_rx_queue = NULL;
+        vSemaphoreDelete(s_tx_done);
+        s_tx_done = NULL;
         return ESP_ERR_NO_MEM;
     }
 
@@ -682,6 +749,13 @@ esp_err_t g2g_ble_start(const g2g_ble_config_t *config)
         ESP_LOGE(TAG, "falha ao criar nimble_host stack=%u", (unsigned)NIMBLE_HS_STACK_SIZE);
         s_running = false;
         nimble_port_deinit();
+        vTaskDelay(pdMS_TO_TICKS(300));
+        vQueueDelete(s_tx_queue);
+        s_tx_queue = NULL;
+        vQueueDelete(s_rx_queue);
+        s_rx_queue = NULL;
+        vSemaphoreDelete(s_tx_done);
+        s_tx_done = NULL;
         return ESP_ERR_NO_MEM;
     }
 
@@ -708,10 +782,15 @@ esp_err_t g2g_ble_stop(void)
     }
 
     nimble_port_stop();
+    vTaskDelay(pdMS_TO_TICKS(300));
 
     if (s_tx_queue) {
         vQueueDelete(s_tx_queue);
         s_tx_queue = NULL;
+    }
+    if (s_rx_queue) {
+        vQueueDelete(s_rx_queue);
+        s_rx_queue = NULL;
     }
     if (s_tx_done) {
         vSemaphoreDelete(s_tx_done);
