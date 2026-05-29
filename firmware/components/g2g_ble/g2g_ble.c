@@ -23,10 +23,18 @@ static const char *TAG = "g2g_ble";
 #define G2G_ATT_MTU 247
 #define G2G_TX_TASK_STACK 3072
 #define G2G_TX_TASK_PRIO 5
+#define G2G_TX_BATCH_MAX G2G_BLE_TX_QUEUE_LEN
 #define G2G_RX_TASK_STACK 8192
 #define G2G_RX_TASK_PRIO 6
 #define G2G_RX_QUEUE_LEN 4
-#define G2G_CONN_TIMEOUT_MS 7000
+#define G2G_CONN_TIMEOUT_MS 3000
+#define G2G_RESUME_DELAY_MS 350
+#define G2G_RESUME_RETRY_MS 250
+#define G2G_TX_IDLE_WAIT_MS 1500
+#define G2G_TX_RETRY_MAX 5
+#define G2G_TX_RETRY_DELAY_MS 450
+#define G2G_TX_DISCOVERY_SETTLE_MS 120
+#define G2G_TX_POST_RX_SETTLE_MS 250
 
 #ifndef BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN
 #define BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN 0x0d
@@ -78,6 +86,8 @@ static const ble_uuid128_t G2G_RX_UUID =
 
 typedef struct {
     uint16_t len;
+    bool has_exclude_addr;
+    ble_addr_t exclude_addr;
     uint8_t bytes[G2G_BLE_FRAGMENT_MAX_LEN];
 } g2g_fragment_t;
 
@@ -102,6 +112,14 @@ static bool s_running;
 static bool s_synced;
 static bool s_advertising;
 static bool s_scanning;
+static volatile bool s_rx_active;
+static volatile bool s_resume_pending;
+static TickType_t s_resume_at;
+static uint16_t s_rx_conn_handle;
+static bool s_rx_has_peer_addr;
+static ble_addr_t s_rx_peer_addr;
+static bool s_callback_has_exclude_addr;
+static ble_addr_t s_callback_exclude_addr;
 static uint8_t s_own_addr_type;
 
 static g2g_peer_t s_peers[G2G_BLE_MAX_PEERS];
@@ -120,6 +138,16 @@ static int rx_access_cb(
     struct ble_gatt_access_ctxt *ctxt,
     void *arg
 );
+
+static bool gap_busy(int rc)
+{
+    return rc == BLE_HS_EALREADY || rc == BLE_HS_EBUSY;
+}
+
+static bool gap_already(int rc)
+{
+    return rc == BLE_HS_EALREADY;
+}
 
 static const struct ble_gatt_chr_def G2G_CHRS[] = {
     {
@@ -149,6 +177,26 @@ static void stats_inc(uint64_t *field)
 static bool addr_equal(const ble_addr_t *a, const ble_addr_t *b)
 {
     return a && b && a->type == b->type && memcmp(a->val, b->val, sizeof(a->val)) == 0;
+}
+
+static bool batch_excludes_peer(
+    const g2g_fragment_t *fragments,
+    size_t fragment_count,
+    const ble_addr_t *addr
+)
+{
+    if (!fragments || fragment_count == 0 || !addr) {
+        return false;
+    }
+
+    for (size_t i = 0; i < fragment_count; ++i) {
+        if (!fragments[i].has_exclude_addr ||
+            !addr_equal(&fragments[i].exclude_addr, addr)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static bool uuid128_equal(const ble_uuid128_t *a, const ble_uuid128_t *b)
@@ -195,6 +243,15 @@ static void remember_peer(const ble_addr_t *addr)
             s_peers[i].in_use = true;
             s_peers[i].addr = *addr;
             stats_inc(&s_stats.discovered_peers);
+            ESP_LOGI(TAG,
+                     "G2G peer descoberto type=%u mac=%02x:%02x:%02x:%02x:%02x:%02x",
+                     (unsigned)addr->type,
+                     addr->val[5],
+                     addr->val[4],
+                     addr->val[3],
+                     addr->val[2],
+                     addr->val[1],
+                     addr->val[0]);
             return;
         }
     }
@@ -218,6 +275,11 @@ static esp_err_t start_advertising(void)
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
+        if (gap_busy(rc)) {
+            s_advertising = true;
+            ESP_LOGI(TAG, "Advertising ja ativo/ocupado rc=%d", rc);
+            return ESP_OK;
+        }
         ESP_LOGE(TAG, "ble_gap_adv_set_fields rc=%d", rc);
         return ESP_FAIL;
     }
@@ -229,6 +291,15 @@ static esp_err_t start_advertising(void)
     rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER,
                            &params, gap_event, NULL);
     if (rc != 0) {
+        if (gap_already(rc)) {
+            s_advertising = true;
+            ESP_LOGI(TAG, "Advertising ja ativo rc=%d", rc);
+            return ESP_OK;
+        }
+        if (rc == BLE_HS_EBUSY) {
+            ESP_LOGI(TAG, "Advertising ocupado; reagendando rc=%d", rc);
+            return ESP_ERR_INVALID_STATE;
+        }
         ESP_LOGE(TAG, "ble_gap_adv_start rc=%d", rc);
         return ESP_FAIL;
     }
@@ -255,6 +326,15 @@ static esp_err_t start_scanning(void)
 
     int rc = ble_gap_disc(s_own_addr_type, BLE_HS_FOREVER, &params, gap_event, NULL);
     if (rc != 0) {
+        if (gap_already(rc)) {
+            s_scanning = true;
+            ESP_LOGI(TAG, "Scan ja ativo rc=%d", rc);
+            return ESP_OK;
+        }
+        if (rc == BLE_HS_EBUSY) {
+            ESP_LOGI(TAG, "Scan ocupado; reagendando rc=%d", rc);
+            return ESP_ERR_INVALID_STATE;
+        }
         ESP_LOGE(TAG, "ble_gap_disc rc=%d", rc);
         return ESP_FAIL;
     }
@@ -267,20 +347,68 @@ static esp_err_t start_scanning(void)
 static void stop_scanning(void)
 {
     if (s_scanning) {
-        ble_gap_disc_cancel();
+        int rc = ble_gap_disc_cancel();
+        if (rc != 0 && !gap_busy(rc)) {
+            ESP_LOGW(TAG, "ble_gap_disc_cancel rc=%d", rc);
+        }
         s_scanning = false;
     }
 }
 
-static void resume_presence(void)
+static void stop_advertising(void)
 {
+    if (s_advertising) {
+        int rc = ble_gap_adv_stop();
+        if (rc != 0 && !gap_busy(rc)) {
+            ESP_LOGW(TAG, "ble_gap_adv_stop rc=%d", rc);
+        }
+        s_advertising = false;
+    }
+}
+
+static void schedule_presence_resume(uint32_t delay_ms)
+{
+    if (!s_running) {
+        return;
+    }
+
+    s_resume_pending = true;
+    s_resume_at = xTaskGetTickCount() + pdMS_TO_TICKS(delay_ms);
+}
+
+static esp_err_t resume_presence_now(void)
+{
+    if (!s_running || !s_synced || s_tx.active || s_rx_active) {
+        schedule_presence_resume(G2G_RESUME_RETRY_MS);
+        return ESP_ERR_INVALID_STATE;
+    }
+
     esp_err_t adv_err = start_advertising();
     esp_err_t scan_err = start_scanning();
     if (adv_err != ESP_OK || scan_err != ESP_OK) {
-        ESP_LOGW(TAG, "resume_presence falhou adv=%s scan=%s",
+        ESP_LOGW(TAG, "resume_presence reagendado adv=%s scan=%s",
                  esp_err_to_name(adv_err),
                  esp_err_to_name(scan_err));
+        schedule_presence_resume(G2G_RESUME_RETRY_MS);
+        return ESP_ERR_INVALID_STATE;
     }
+
+    return ESP_OK;
+}
+
+static void maybe_resume_presence(void)
+{
+    if (!s_resume_pending) {
+        return;
+    }
+
+    TickType_t now = xTaskGetTickCount();
+    if ((int32_t)(now - s_resume_at) < 0) {
+        return;
+    }
+
+    s_resume_pending = false;
+    (void)resume_presence_now();
 }
 
 static void tx_complete(bool ok)
@@ -288,42 +416,6 @@ static void tx_complete(bool ok)
     s_tx.ok = ok;
     if (s_tx_done) {
         xSemaphoreGive(s_tx_done);
-    }
-}
-
-static int write_cb(
-    uint16_t conn_handle,
-    const struct ble_gatt_error *error,
-    struct ble_gatt_attr *attr,
-    void *arg
-)
-{
-    (void)conn_handle;
-    (void)attr;
-    (void)arg;
-
-    tx_complete(error && error->status == 0);
-    return 0;
-}
-
-static void write_current_fragment(void)
-{
-    if (!s_tx.fragment || s_tx.conn_handle == BLE_HS_CONN_HANDLE_NONE || s_tx.chr_handle == 0) {
-        tx_complete(false);
-        return;
-    }
-
-    int rc = ble_gattc_write_flat(
-        s_tx.conn_handle,
-        s_tx.chr_handle,
-        s_tx.fragment->bytes,
-        s_tx.fragment->len,
-        write_cb,
-        NULL
-    );
-
-    if (rc != 0) {
-        tx_complete(false);
     }
 }
 
@@ -344,7 +436,7 @@ static int chr_disc_cb(
 
     if (error->status == 0 && chr) {
         s_tx.chr_handle = chr->val_handle;
-        write_current_fragment();
+        tx_complete(true);
         return 0;
     }
 
@@ -415,50 +507,131 @@ static int mtu_cb(
     return 0;
 }
 
-static bool send_to_peer(const ble_addr_t *addr, const g2g_fragment_t *fragment)
+static bool send_batch_to_peer(
+    const ble_addr_t *addr,
+    const g2g_fragment_t *fragments,
+    size_t fragment_count
+)
 {
-    struct ble_gap_conn_params params;
-
-    if (!addr || !fragment || !s_tx_done) {
+    if (!addr || !fragments || fragment_count == 0 || !s_tx_done) {
         return false;
     }
 
-    stop_scanning();
+    for (uint32_t attempt = 1; attempt <= G2G_TX_RETRY_MAX && s_running; ++attempt) {
+        struct ble_gap_conn_params params;
+        bool waited_for_rx = false;
+        TickType_t wait_start = xTaskGetTickCount();
+        while (s_running && s_rx_active) {
+            waited_for_rx = true;
+            if (xTaskGetTickCount() - wait_start > pdMS_TO_TICKS(G2G_TX_IDLE_WAIT_MS)) {
+                ESP_LOGW(TAG,
+                         "TX G2G aguardando RX ativo tentativa=%lu/%u",
+                         (unsigned long)attempt,
+                         (unsigned)G2G_TX_RETRY_MAX);
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        if (s_rx_active) {
+            vTaskDelay(pdMS_TO_TICKS(G2G_TX_RETRY_DELAY_MS));
+            continue;
+        }
+        if (waited_for_rx) {
+            vTaskDelay(pdMS_TO_TICKS(G2G_TX_POST_RX_SETTLE_MS));
+        }
 
-    memset(&s_tx, 0, sizeof(s_tx));
-    s_tx.active = true;
-    s_tx.conn_handle = BLE_HS_CONN_HANDLE_NONE;
-    s_tx.fragment = fragment;
+        stop_advertising();
+        stop_scanning();
 
-    while (xSemaphoreTake(s_tx_done, 0) == pdTRUE) {
-    }
+        memset(&s_tx, 0, sizeof(s_tx));
+        s_tx.active = true;
+        s_tx.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        s_tx.fragment = NULL;
 
-    memset(&params, 0, sizeof(params));
-    params.scan_itvl = 0x0010;
-    params.scan_window = 0x0010;
-    params.itvl_min = 0x0018;
-    params.itvl_max = 0x0028;
-    params.latency = 0;
-    params.supervision_timeout = 0x0100;
+        while (xSemaphoreTake(s_tx_done, 0) == pdTRUE) {
+        }
 
-    int rc = ble_gap_connect(s_own_addr_type, addr, G2G_CONN_TIMEOUT_MS,
-                             &params, gap_event, NULL);
-    if (rc != 0) {
+        memset(&params, 0, sizeof(params));
+        params.scan_itvl = 0x0010;
+        params.scan_window = 0x0010;
+        params.itvl_min = 0x0018;
+        params.itvl_max = 0x0028;
+        params.latency = 0;
+        params.supervision_timeout = 0x0100;
+
+        int rc = ble_gap_connect(s_own_addr_type, addr, G2G_CONN_TIMEOUT_MS,
+                                 &params, gap_event, NULL);
+        if (rc != 0) {
+            ESP_LOGW(TAG,
+                     "falha ao conectar G2G tentativa=%lu/%u rc=%d",
+                     (unsigned long)attempt,
+                     (unsigned)G2G_TX_RETRY_MAX,
+                     rc);
+            s_tx.active = false;
+            schedule_presence_resume(G2G_RESUME_RETRY_MS);
+            vTaskDelay(pdMS_TO_TICKS(G2G_TX_RETRY_DELAY_MS));
+            continue;
+        }
+
+        bool done = xSemaphoreTake(s_tx_done, pdMS_TO_TICKS(G2G_CONN_TIMEOUT_MS)) == pdTRUE;
+        bool ok = done && s_tx.ok && s_tx.conn_handle != BLE_HS_CONN_HANDLE_NONE && s_tx.chr_handle != 0;
+        if (!done) {
+            int cancel_rc = ble_gap_conn_cancel();
+            if (cancel_rc != 0 && !gap_busy(cancel_rc)) {
+                ESP_LOGW(TAG, "ble_gap_conn_cancel rc=%d", cancel_rc);
+            }
+        }
+        if (!ok) {
+            ESP_LOGW(TAG,
+                     "descoberta G2G falhou tentativa=%lu/%u done=%d ok=%d handle=%u chr=%u",
+                     (unsigned long)attempt,
+                     (unsigned)G2G_TX_RETRY_MAX,
+                     done ? 1 : 0,
+                     s_tx.ok ? 1 : 0,
+                     (unsigned)s_tx.conn_handle,
+                     (unsigned)s_tx.chr_handle);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(G2G_TX_DISCOVERY_SETTLE_MS));
+        }
+
+        for (size_t i = 0; ok && i < fragment_count; ++i) {
+            rc = ble_gattc_write_no_rsp_flat(
+                s_tx.conn_handle,
+                s_tx.chr_handle,
+                fragments[i].bytes,
+                fragments[i].len
+            );
+            ok = rc == 0;
+            if (!ok) {
+                ESP_LOGW(TAG,
+                         "falha ao escrever fragmento G2G %u/%u len=%u rc=%d tentativa=%lu/%u",
+                         (unsigned)i,
+                         (unsigned)fragment_count,
+                         (unsigned)fragments[i].len,
+                         rc,
+                         (unsigned long)attempt,
+                         (unsigned)G2G_TX_RETRY_MAX);
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        if (s_tx.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+            rc = ble_gap_terminate(s_tx.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            if (rc != 0) {
+                ESP_LOGW(TAG, "ble_gap_terminate rc=%d", rc);
+            }
+        }
+
         s_tx.active = false;
-        resume_presence();
-        return false;
+        schedule_presence_resume(G2G_RESUME_DELAY_MS);
+        if (ok) {
+            return true;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(G2G_TX_RETRY_DELAY_MS));
     }
 
-    bool done = xSemaphoreTake(s_tx_done, pdMS_TO_TICKS(G2G_CONN_TIMEOUT_MS)) == pdTRUE;
-    bool ok = done && s_tx.ok;
-
-    if (s_tx.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        ble_gap_terminate(s_tx.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-    }
-
-    s_tx.active = false;
-    resume_presence();
-    return ok;
+    return false;
 }
 
 static void tx_task(void *arg)
@@ -466,27 +639,63 @@ static void tx_task(void *arg)
     (void)arg;
 
     while (s_running) {
-        g2g_fragment_t fragment;
-        if (xQueueReceive(s_tx_queue, &fragment, pdMS_TO_TICKS(250)) != pdTRUE) {
+        maybe_resume_presence();
+
+        g2g_fragment_t batch[G2G_TX_BATCH_MAX];
+        size_t batch_count = 0;
+
+        if (xQueueReceive(s_tx_queue, &batch[0], pdMS_TO_TICKS(250)) != pdTRUE) {
             continue;
+        }
+        batch_count = 1;
+
+        vTaskDelay(pdMS_TO_TICKS(30));
+        while (batch_count < G2G_TX_BATCH_MAX &&
+               xQueueReceive(s_tx_queue, &batch[batch_count], 0) == pdTRUE) {
+            batch_count++;
         }
 
         bool sent = false;
+        bool has_peer = false;
+        bool attempted = false;
+        bool skipped_origin = false;
         for (size_t i = 0; i < G2G_BLE_MAX_PEERS; ++i) {
             if (!s_peers[i].in_use) {
                 continue;
             }
 
-            if (send_to_peer(&s_peers[i].addr, &fragment)) {
+            has_peer = true;
+            if (batch_excludes_peer(batch, batch_count, &s_peers[i].addr)) {
+                skipped_origin = true;
+                continue;
+            }
+
+            attempted = true;
+            if (send_batch_to_peer(&s_peers[i].addr, batch, batch_count)) {
                 sent = true;
-                stats_inc(&s_stats.tx_fragments);
+                for (size_t j = 0; j < batch_count; ++j) {
+                    stats_inc(&s_stats.tx_fragments);
+                }
             } else {
-                stats_inc(&s_stats.tx_errors);
+                for (size_t j = 0; j < batch_count; ++j) {
+                    stats_inc(&s_stats.tx_errors);
+                }
             }
         }
 
         if (!sent) {
-            (void)start_scanning();
+            if (!has_peer) {
+                ESP_LOGW(TAG,
+                         "sem peer G2G para enviar batch fragments=%u",
+                         (unsigned)batch_count);
+            } else if (!attempted && skipped_origin) {
+                ESP_LOGI(TAG,
+                         "relay G2G ignorado: somente peer origem fragments=%u",
+                         (unsigned)batch_count);
+            }
+            if (attempted || !skipped_origin) {
+                schedule_presence_resume(G2G_RESUME_RETRY_MS);
+            }
         }
     }
 
@@ -505,7 +714,12 @@ static void rx_task(void *arg)
         }
 
         if (s_config.on_fragment) {
+            s_callback_has_exclude_addr = fragment.has_exclude_addr;
+            if (fragment.has_exclude_addr) {
+                s_callback_exclude_addr = fragment.exclude_addr;
+            }
             s_config.on_fragment(fragment.bytes, fragment.len, s_config.ctx);
+            s_callback_has_exclude_addr = false;
         }
     }
 
@@ -543,6 +757,10 @@ static int rx_access_cb(
     g2g_fragment_t fragment;
     memset(&fragment, 0, sizeof(fragment));
     fragment.len = len;
+    fragment.has_exclude_addr = s_rx_has_peer_addr;
+    if (s_rx_has_peer_addr) {
+        fragment.exclude_addr = s_rx_peer_addr;
+    }
     if (os_mbuf_copydata(ctxt->om, 0, len, fragment.bytes) != 0) {
         stats_inc(&s_stats.rx_errors);
         ESP_LOGW(TAG, "RX copydata falhou len=%u", (unsigned)len);
@@ -583,12 +801,23 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                 } else {
                     ESP_LOGW(TAG, "G2G BLE connect outbound falhou status=%d", event->connect.status);
                     tx_complete(false);
+                    schedule_presence_resume(G2G_RESUME_RETRY_MS);
                 }
             } else if (event->connect.status == 0) {
+                struct ble_gap_conn_desc desc;
                 s_advertising = false;
+                s_rx_active = true;
+                s_rx_conn_handle = event->connect.conn_handle;
+                s_rx_has_peer_addr = false;
+                if (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0) {
+                    s_rx_peer_addr = desc.peer_ota_addr;
+                    s_rx_has_peer_addr = true;
+                }
+                stop_scanning();
                 ESP_LOGI(TAG, "G2G BLE conectado inbound handle=%u", event->connect.conn_handle);
             } else {
                 ESP_LOGW(TAG, "G2G BLE connect inbound falhou status=%d", event->connect.status);
+                schedule_presence_resume(G2G_RESUME_RETRY_MS);
             }
             return 0;
 
@@ -598,19 +827,25 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                      event->disconnect.reason);
             if (s_tx.active && s_tx.conn_handle == event->disconnect.conn.conn_handle) {
                 s_tx.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                tx_complete(false);
+            }
+            if (s_rx_active && s_rx_conn_handle == event->disconnect.conn.conn_handle) {
+                s_rx_active = false;
+                s_rx_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                s_rx_has_peer_addr = false;
             }
             s_advertising = false;
-            resume_presence();
+            schedule_presence_resume(G2G_RESUME_DELAY_MS);
             return 0;
 
         case BLE_GAP_EVENT_ADV_COMPLETE:
             s_advertising = false;
-            (void)start_advertising();
+            schedule_presence_resume(G2G_RESUME_DELAY_MS);
             return 0;
 
         case BLE_GAP_EVENT_DISC_COMPLETE:
             s_scanning = false;
-            (void)start_scanning();
+            schedule_presence_resume(G2G_RESUME_DELAY_MS);
             return 0;
 
         default:
@@ -642,7 +877,7 @@ static void on_sync(void)
 
     s_synced = true;
     ESP_LOGI(TAG, "NimBLE own_addr_type=%u", (unsigned)s_own_addr_type);
-    resume_presence();
+    schedule_presence_resume(0);
 }
 
 static void host_task(void *param)
@@ -671,6 +906,12 @@ esp_err_t g2g_ble_start(const g2g_ble_config_t *config)
     memset(&s_stats, 0, sizeof(s_stats));
     memset(s_peers, 0, sizeof(s_peers));
     memset(&s_tx, 0, sizeof(s_tx));
+    s_rx_active = false;
+    s_rx_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    s_rx_has_peer_addr = false;
+    s_callback_has_exclude_addr = false;
+    s_resume_pending = false;
+    s_resume_at = 0;
 
     s_tx_queue = xQueueCreate(G2G_BLE_TX_QUEUE_LEN, sizeof(g2g_fragment_t));
     s_rx_queue = xQueueCreate(G2G_RX_QUEUE_LEN, sizeof(g2g_fragment_t));
@@ -772,11 +1013,13 @@ esp_err_t g2g_ble_stop(void)
     }
 
     s_running = false;
+    s_resume_pending = false;
+    s_rx_active = false;
+    s_rx_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    s_rx_has_peer_addr = false;
+    s_callback_has_exclude_addr = false;
     stop_scanning();
-    if (s_advertising) {
-        ble_gap_adv_stop();
-        s_advertising = false;
-    }
+    stop_advertising();
     if (s_tx.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         ble_gap_terminate(s_tx.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
     }
@@ -816,6 +1059,10 @@ esp_err_t g2g_ble_send_fragment(const uint8_t *bytes, size_t len)
     g2g_fragment_t fragment;
     memset(&fragment, 0, sizeof(fragment));
     fragment.len = (uint16_t)len;
+    fragment.has_exclude_addr = s_callback_has_exclude_addr;
+    if (s_callback_has_exclude_addr) {
+        fragment.exclude_addr = s_callback_exclude_addr;
+    }
     memcpy(fragment.bytes, bytes, len);
 
     if (xQueueSend(s_tx_queue, &fragment, 0) != pdTRUE) {

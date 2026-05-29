@@ -56,7 +56,8 @@ enum ConscienceState {
     NormalCore,
     NormalOnline,
     Admin,
-    ActionPillProcessing,
+    ActionPillRelay,
+    ActionPillDigest,
 }
 
 static mut ACTION_PIPELINE: Option<ActionPipeline> = None;
@@ -208,7 +209,6 @@ fn enter_normal_mode(cfg: &ZoneguardConfigRaw) -> Result {
     } else {
         log_optional_services("gateway", false);
     }
-
     transition_to(ConscienceState::NormalOnline);
     Ok(())
 }
@@ -229,6 +229,7 @@ fn start_normal_wifi(cfg: &ZoneguardConfigRaw) -> Result {
     } else {
         4
     };
+
     wifi_config.sta_max_retries = 10;
     wifi_config.ap_hidden = false;
     wifi_manager::start(&wifi_config)
@@ -537,16 +538,27 @@ fn delay_us(duration_us: i64) {
 fn on_action_pill_received(pill: &ActionPill) -> Result {
     let pill_copy = *pill;
     let previous_state = current_state();
-    transition_to(ConscienceState::ActionPillProcessing);
 
     unsafe {
+        transition_to(ConscienceState::ActionPillRelay);
+        let relay_result = g2g::send_action_pill(&pill_copy);
+        log_pipeline_relay_result(match relay_result {
+            Ok(()) => platform::ESP_OK,
+            Err(err) => err,
+        });
+
+        transition_to(ConscienceState::ActionPillDigest);
         let pipeline = ptr::addr_of_mut!(ACTION_PIPELINE);
-        let result = match (*pipeline).as_mut() {
+        let local_result = match (*pipeline).as_mut() {
             Some(pipeline) => pipeline.process_action_pill(pill_copy),
             None => Err(platform::ESP_ERR_INVALID_STATE),
         };
         transition_to(previous_state);
-        result
+        match local_result {
+            Ok(()) => Ok(()),
+            Err(platform::ESP_ERR_NOT_FOUND) => relay_result,
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -620,7 +632,8 @@ fn state_name(state: ConscienceState) -> *const c_char {
         ConscienceState::NormalCore => c"NORMAL_CORE".as_ptr(),
         ConscienceState::NormalOnline => c"NORMAL_ONLINE".as_ptr(),
         ConscienceState::Admin => c"ADMIN".as_ptr(),
-        ConscienceState::ActionPillProcessing => c"ACTION_PILL".as_ptr(),
+        ConscienceState::ActionPillRelay => c"ACTION_RELAY".as_ptr(),
+        ConscienceState::ActionPillDigest => c"ACTION_DIGEST".as_ptr(),
     }
 }
 
@@ -743,6 +756,22 @@ fn log_pipeline_result(err: platform::EspErr) {
             level,
             log_pipeline_tag(),
             c"publish digested result err=0x%08x".as_ptr(),
+            err as u32,
+        );
+    }
+}
+
+fn log_pipeline_relay_result(err: platform::EspErr) {
+    let level = if err == platform::ESP_OK {
+        ESP_LOG_INFO
+    } else {
+        ESP_LOG_WARN
+    };
+    unsafe {
+        esp_log_write(
+            level,
+            log_pipeline_tag(),
+            c"relay result err=0x%08x".as_ptr(),
             err as u32,
         );
     }
