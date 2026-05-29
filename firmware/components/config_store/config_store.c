@@ -7,13 +7,14 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_random.h"
+#include "mbedtls/platform_util.h"
 
 static const char *TAG = "config_store";
 static const char *NVS_NS = "zoneguard";
 static const char *NVS_KEY = "config_blob";
 
 #define ZG_CONFIG_MAGIC 0x5A474346u
-#define ZG_CONFIG_VERSION 1u
+#define ZG_CONFIG_VERSION 2u
 
 static bool s_initialized = false;
 
@@ -29,7 +30,7 @@ void config_store_set_defaults(zoneguard_config_t *config)
 {
     if (!config) return;
 
-    memset(config, 0, sizeof(*config));
+    mbedtls_platform_zeroize(config, sizeof(*config));
 
     config->magic = ZG_CONFIG_MAGIC;
     config->version = ZG_CONFIG_VERSION;
@@ -51,10 +52,8 @@ void config_store_set_defaults(zoneguard_config_t *config)
     cfg_copy(config->telemetry_host, sizeof(config->telemetry_host), "");
     config->telemetry_port = 5757;
 
-    config->swarm_key_len = 16;
-    for (int i = 0; i < config->swarm_key_len; ++i) {
-        config->swarm_key[i] = (uint8_t)esp_random();
-    }
+    config->swarm_key_len = 0;
+    memset(config->swarm_key, 0, sizeof(config->swarm_key));
 
     config->policy_version = 1;
 }

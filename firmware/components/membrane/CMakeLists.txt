@@ -1,0 +1,16 @@
+idf_component_register(
+    SRCS
+        "ribosome_table/ribosome_table.c"
+        "ribosome_table/ribosome_store.c"
+        "rna_membrane/rna_membrane.c"
+        "rna_membrane/amino_acids/amino_acids.c"
+    INCLUDE_DIRS
+        "."
+        "ribosome_table"
+        "rna_membrane"
+        "rna_membrane/amino_acids"
+    REQUIRES
+        esp_common
+        mbedtls
+        nvs_flash
+)

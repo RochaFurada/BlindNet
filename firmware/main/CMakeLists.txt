@@ -1,7 +1,8 @@
 idf_component_register(
-    SRCS "app_main.cpp"
+    SRCS "app_main.c"
     INCLUDE_DIRS "."
     REQUIRES
+        esp_common
         event_bus
         config_store
         wifi_manager
@@ -11,9 +12,10 @@ idf_component_register(
         rate_limiter
         quarantine_manager
         device_registry
+        MQTT_broker
         dns_filter
         zone_firewall
-        swarm_agent
-        telemetry_agent
         admin_server
+        setup_button
+        cortex
 )

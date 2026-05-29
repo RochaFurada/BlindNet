@@ -28,7 +28,9 @@ typedef enum {
     ZG_EVENT_GATEWAY_UP,
     ZG_EVENT_GATEWAY_DOWN,
     ZG_EVENT_CONFIG_UPDATED,
-    ZG_EVENT_ERROR
+    ZG_EVENT_ERROR,
+    ZG_EVENT_AP_CLIENT_JOINED,
+    ZG_EVENT_AP_CLIENT_LEFT
 } zg_event_type_t;
 
 typedef struct {
