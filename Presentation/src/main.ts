@@ -226,10 +226,6 @@ app.innerHTML = `
         <span>IA</span>
         Transparência
       </a>
-      <a class="step-link test-link" href="#testar" data-target="testar">
-        <span>▶</span>
-        Testar
-      </a>
     </nav>
   </header>
 
@@ -242,6 +238,8 @@ app.innerHTML = `
     </section>
 
     ${slideMarkup}
+
+    
 
     <section class="transparency" id="transparencia">
       <div class="transparency-copy">
