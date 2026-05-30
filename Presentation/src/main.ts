@@ -226,6 +226,10 @@ app.innerHTML = `
         <span>IA</span>
         Transparência
       </a>
+      <a class="step-link test-link" href="#testar" data-target="testar">
+        <span>▶</span>
+        Testar
+      </a>
     </nav>
   </header>
 
@@ -239,7 +243,19 @@ app.innerHTML = `
 
     ${slideMarkup}
 
-    
+    <section class="test-lab" id="testar">
+      <div class="test-copy">
+        <p class="details-index">Demonstração ao vivo</p>
+        <h2>Enviar comandos para os dispositivos</h2>
+        <p>
+          Esta aba usa o notebook como ponte local. Os visitantes clicam no botão,
+          o servidor local gera uma Action Pill com o Python existente e envia por BLE/G2G.
+        </p>
+        <div class="bridge-status" id="bridgeStatus">Verificando ponte local...</div>
+      </div>
+
+      <div class="device-grid" id="deviceGrid"></div>
+    </section>
 
     <section class="transparency" id="transparencia">
       <div class="transparency-copy">
