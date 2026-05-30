@@ -1,0 +1,12 @@
+{
+  "action_pill": "C:\\Users\\Samue\\Desktop\\TrabalhoESP\\BlindNet\\Presentation\\bridge\\out\\a650228f-dfff-46eb-94bc-a8628dcf9bbc.bin",
+  "action_pill_len": 480,
+  "fragment_count": 3,
+  "message_id_hex": "448d30d8e4ac37725863912da0ba9b356e90d11f6e1907d83b698db6823ad1e1",
+  "issuer_key_id_hex": "425e6d634ba7107b23a73d55e6f6ffc0",
+  "active_hash_hex": "93f0b5b277d5b1b6fcd3dac1fd36cd243348d278c1676ac554df5c63f0b5d5b2",
+  "empty_active": false,
+  "signature_len": 72,
+  "service_uuid": "0150534e-4152-542d-5041-2d4732474e42",
+  "char_uuid": "01454d47-4152-462d-5852-2d4732474e42"
+}

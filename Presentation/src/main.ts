@@ -1,593 +1,508 @@
 import "./styles.css";
 
-type Layer = {
+type Slide = {
+  id: string;
+  index: string;
+  eyebrow: string;
   title: string;
-  short: string;
-  threat: string;
-  blocks: string;
-  remaining: string;
-  badge: string;
-  mapState: "plain" | "guardian" | "pill" | "relay" | "safe";
-};
-
-type PillTab = "cp" | "as" | "why";
-
-type PillField = {
-  name: string;
-  purpose: string;
-  blocks: string;
-};
-
-type TimelineItem = {
-  phase: string;
+  image: string;
   problem: string;
-  prompt: string;
-  decision: string;
-  evidence: string;
+  solution: string;
+  why: string;
+  limit?: string;
 };
 
-const layers: Layer[] = [
+const images = {
+  setup: new URL("../Diagramas/configs/setup_inicial.png", import.meta.url).href,
+  admin: new URL("../Diagramas/configs/admin_cadastro.png", import.meta.url).href,
+  guardian: new URL("../Diagramas/01_guardian_rede_protegida.png", import.meta.url).href,
+  actionPill: new URL("../Diagramas/02_action_pill_cp_as.png", import.meta.url).href,
+  signature: new URL("../Diagramas/03_assinatura_anti_replay.png", import.meta.url).href,
+  stomach: new URL("../Diagramas/04_stomach_digestao_action_pill.png", import.meta.url).href,
+  ribosome: new URL("../Diagramas/05_ribosome_membrane_pipeline.png", import.meta.url).href,
+  rna: new URL("../Diagramas/06_rna_amino_acids.png", import.meta.url).href,
+  enzyme: new URL("../Diagramas/07_active_enzyme_device_secret.png", import.meta.url).href,
+  membrane: new URL("../Diagramas/08_membrane_filtro_semantico.png", import.meta.url).href,
+  mqtt: new URL("../Diagramas/09_nucleo_mqtt_publicacao_local.png", import.meta.url).href,
+  g2g: new URL("../Diagramas/10_g2g_relay_guardians.png", import.meta.url).href,
+  iaSupport: new URL("../Diagramas/IA/IA_como_apoio.png", import.meta.url).href,
+  iaTable: new URL("../Diagramas/IA/tabela_apoio.png", import.meta.url).href,
+};
+
+const slides: Slide[] = [
   {
-    title: "Rede IoT comum",
-    short: "App, broker e dispositivo ficam próximos demais. Descobrir a rede quase vira descobrir o controle.",
-    threat: "Scan encontra broker, tópico e dispositivo. Um atacante tenta publicar TOGGLE.",
-    blocks: "Nada ainda.",
-    remaining: "Publicação falsa, leitura de tráfego, sondagem e replay.",
-    badge: "risco alto",
-    mapState: "plain",
+    id: "setup",
+    index: "01",
+    eyebrow: "Configuração",
+    title: "Setup inicial do Guardian",
+    image: images.setup,
+    problem: "Um Guardian novo ainda não sabe a rede principal, a zona, a chave pública do dono nem sua identidade local.",
+    solution: "Ele sobe um AP temporário de setup, recebe as configurações mínimas, grava no config store e reinicia no modo normal.",
+    why: "Isso separa o nascimento do nó da operação diária e evita deixar portas permanentes abertas para configuração.",
   },
   {
-    title: "Guardian na fronteira",
-    short: "O dispositivo sai da rede principal e passa a viver atrás do AP do Guardian.",
-    threat: "Atacante não encontra mais a lâmpada como alvo direto na rede principal.",
-    blocks: "Scan direto do dispositivo e comando IP/MQTT externo simples.",
-    remaining: "Ainda é preciso proteger a entrada do Guardian.",
-    badge: "fronteira",
-    mapState: "guardian",
+    id: "admin",
+    index: "02",
+    eyebrow: "Cadastro",
+    title: "Admin e cadastro do dispositivo",
+    image: images.admin,
+    problem: "O Guardian precisa aprender que existe um dispositivo real, qual RNA ele deve usar e qual secret protege o Active Substance.",
+    solution: "O dono abre uma janela admin, resolve um desafio assinado, aprova o dispositivo visto e o Guardian grava a entrada na Ribosome Table.",
+    why: "O device_secret fica no Guardian, enquanto o app usa esse secret para montar Action Pills destinadas ao dispositivo correto.",
   },
   {
-    title: "BLE como plano de controle",
-    short: "A intenção entra por BLE/G2G, separada do broker local e da rede IP dos dispositivos.",
-    threat: "Rede local deixa de ser o caminho direto de comando.",
-    blocks: "Dependência de portas locais e exposição do broker como entrada pública.",
-    remaining: "BLE ainda pode sofrer disputa de rádio e DoS.",
-    badge: "controle",
-    mapState: "guardian",
+    id: "guardian",
+    index: "03",
+    eyebrow: "Fronteira",
+    title: "Guardian como rede protegida",
+    image: images.guardian,
+    problem: "Numa rede IoT comum, scans revelam IPs, portas, serviços e possíveis alvos vulneráveis.",
+    solution: "O dispositivo sai da rede principal e passa a viver atrás do Guardian, com broker local e fronteira própria.",
+    why: "A superfície visível diminui: o atacante deixa de conversar diretamente com a lâmpada, fechadura ou sensor.",
+    limit: "Isso reduz sondagem e exposição, mas ainda precisa de uma cadeia forte para autorizar comandos legítimos.",
   },
   {
-    title: "Action Pill",
-    short: "O comando vira uma cápsula: CP assinado por fora, AS criptografado por dentro.",
-    threat: "Pacote interceptado não revela tópico, device_id ou verbo real.",
-    blocks: "Leitura direta da intenção e alteração simples do comando.",
-    remaining: "Ainda precisa validar autoria e replay.",
-    badge: "opaco",
-    mapState: "pill",
+    id: "action-pill",
+    index: "04",
+    eyebrow: "Cápsula",
+    title: "Action Pill: CP + AS",
+    image: images.actionPill,
+    problem: "Um comando simples de IoT costuma misturar intenção, destino e autorização no mesmo pacote frágil.",
+    solution: "A Action Pill separa Capsule Pill, assinada e verificável, de Active Substance, criptografado para o dispositivo.",
+    why: "O Guardian pode validar e repassar a cápsula sem necessariamente conhecer o conteúdo interno.",
+    limit: "A Action Pill prova autenticidade e integridade, mas o destino final ainda depende da digestão correta.",
   },
   {
+    id: "signature",
+    index: "05",
+    eyebrow: "Autoria",
     title: "Assinatura e anti-replay",
-    short: "O Guardian exige chave privada do dono e rejeita mensagens que já foram vistas.",
-    threat: "Atacante tenta forjar ou reenviar uma Action Pill capturada.",
-    blocks: "Falsificação sem chave privada, troca do AS e replay.",
-    remaining: "Ainda falta saber se este Guardian consegue digerir o AS.",
-    badge: "autêntico",
-    mapState: "pill",
+    image: images.signature,
+    problem: "Capturar um comando válido não deveria permitir repetir esse comando depois.",
+    solution: "O Guardian valida assinatura, expiração, nonce e digest em cache antes de continuar o fluxo.",
+    why: "Sem a chave privada do dono, o atacante não consegue forjar uma cápsula nova; com replay, cai no cache.",
+    limit: "Essa camada protege o estado dos dispositivos, mas não elimina tentativa de ruído ou DoS no rádio.",
   },
   {
-    title: "Ribosome + Membrane",
-    short: "O Guardian tenta abrir o AS com device_secret local e valida se o amino é permitido pelo RNA.",
-    threat: "Comando assinado, mas fora da política do dispositivo, é bloqueado.",
-    blocks: "Guardian errado, comando fora do tipo e payload inválido.",
-    remaining: "Se não for desta zona, a rede G2G deve carregar a intenção.",
-    badge: "digerido",
-    mapState: "safe",
+    id: "stomach",
+    index: "06",
+    eyebrow: "Digestão",
+    title: "Stomach: remontar e decidir",
+    image: images.stomach,
+    problem: "O BLE/G2G entrega fragmentos, e fragmentos isolados não dizem se a intenção é nova, válida ou completa.",
+    solution: "O Stomach remonta a Action Pill, calcula digest, consulta cache e só então libera o próximo passo.",
+    why: "É o ponto onde ruído, duplicata e cápsula incompleta são filtrados antes de trabalho pesado.",
   },
   {
-    title: "G2G entre Guardians",
-    short: "A Action Pill pode entrar por um Guardian e ser repassada até o nó que consegue digerir.",
-    threat: "O app não precisa expor qual Guardian controla qual dispositivo.",
-    blocks: "Mapeamento direto entre entrada, zona e dispositivo.",
-    remaining: "O limite principal do protótipo atual é disponibilidade/DoS.",
-    badge: "malha",
-    mapState: "relay",
+    id: "ribosome",
+    index: "07",
+    eyebrow: "Pipeline",
+    title: "Ribosome, Enzyme e Membrane",
+    image: images.ribosome,
+    problem: "Mesmo uma cápsula autêntica pode não pertencer àquele Guardian ou não fazer sentido para aquele dispositivo.",
+    solution: "A Ribosome Table encontra candidatos, a Active Enzyme tenta abrir o AS e a Membrane valida a semântica pelo RNA.",
+    why: "A autorização deixa de ser apenas criptográfica e passa a ser contextual: dispositivo, comando e regra precisam encaixar.",
+  },
+  {
+    id: "rna",
+    index: "08",
+    eyebrow: "Linguagem",
+    title: "RNA formado por Amino Acids",
+    image: images.rna,
+    problem: "Dispositivos diferentes aceitam ações diferentes, e comando genérico demais vira risco.",
+    solution: "Amino Acids representam ações permitidas; o RNA monta o vocabulário específico de cada dispositivo.",
+    why: "A lâmpada pode aceitar TOGGLE, mas uma fechadura poderia exigir outra gramática e outra política.",
+  },
+  {
+    id: "enzyme",
+    index: "09",
+    eyebrow: "Criptografia local",
+    title: "Active Enzyme e device_secret",
+    image: images.enzyme,
+    problem: "O Guardian não deve aceitar um Active Substance apenas porque a cápsula externa é válida.",
+    solution: "A Active Enzyme tenta descriptografar o AS com o device_secret armazenado para aquele dispositivo.",
+    why: "Só o Guardian que possui o secret correto consegue transformar a substância criptografada em comando executável.",
+    limit: "Se o AS não abre ali, ele pode ser apenas repassado por G2G sem revelar o conteúdo.",
+  },
+  {
+    id: "membrane",
+    index: "10",
+    eyebrow: "Semântica",
+    title: "Membrane como filtro final",
+    image: images.membrane,
+    problem: "Descriptografar não basta: o payload ainda pode pedir algo fora do RNA permitido.",
+    solution: "A Membrane compara o AS com os receptores derivados do RNA e aceita apenas o que encaixa.",
+    why: "É a camada que impede comandos semanticamente estranhos de virarem publicação no broker.",
+  },
+  {
+    id: "mqtt",
+    index: "11",
+    eyebrow: "Execução",
+    title: "Núcleo MQTT local",
+    image: images.mqtt,
+    problem: "O dispositivo IoT deve continuar simples, sem carregar toda a complexidade criptográfica.",
+    solution: "Depois da validação, o Guardian publica um comando local no broker MQTT interno da zona.",
+    why: "A inteligência fica no Guardian; o dispositivo só precisa estar no AP local e escutar seu tópico.",
+  },
+  {
+    id: "g2g",
+    index: "12",
+    eyebrow: "Malha",
+    title: "G2G Relay entre Guardians",
+    image: images.g2g,
+    problem: "O app não sabe necessariamente qual Guardian é o dono final daquele dispositivo.",
+    solution: "O primeiro Guardian verifica cache, repassa a cápsula opaca por BLE/G2G e depois processa localmente.",
+    why: "A intenção pode atravessar a malha sem expor o Active Substance até encontrar o nó capaz de digeri-la.",
+    limit: "A demo já prova o fluxo; a evolução futura é endurecer ainda mais contra negação de serviço no BLE.",
   },
 ];
-
-const cpFields: PillField[] = [
-  {
-    name: "version",
-    purpose: "Evolui o protocolo sem aceitar formato incompatível.",
-    blocks: "Interpretação errada de pacote antigo.",
-  },
-  {
-    name: "action_class",
-    purpose: "Mostra apenas a classe geral, como MQTT ou POLICY.",
-    blocks: "Exposição precoce do comando real.",
-  },
-  {
-    name: "issued_ms / expires_ms",
-    purpose: "Cria contexto temporal para a intenção.",
-    blocks: "Uso tardio de mensagens antigas.",
-  },
-  {
-    name: "nonce",
-    purpose: "Dá unicidade ao pacote.",
-    blocks: "Colisões e replay simples.",
-  },
-  {
-    name: "active_hash",
-    purpose: "Amarra o CP ao AS criptografado.",
-    blocks: "Trocar o conteúdo interno depois da assinatura.",
-  },
-  {
-    name: "issuer_key_id",
-    purpose: "Escolhe qual chave pública deve validar a assinatura.",
-    blocks: "Confusão de identidade do emissor.",
-  },
-  {
-    name: "signature",
-    purpose: "Prova assimétrica de autoria.",
-    blocks: "Forjar comando sem a chave privada.",
-  },
-];
-
-const asFields: PillField[] = [
-  {
-    name: "cipher",
-    purpose: "Declara o algoritmo usado no envelope criptografado.",
-    blocks: "Ambiguidade criptográfica.",
-  },
-  {
-    name: "nonce + tag",
-    purpose: "Permite criptografia autenticada.",
-    blocks: "Alteração silenciosa do ciphertext.",
-  },
-  {
-    name: "ciphertext",
-    purpose: "Carrega device_id, tópico, amino e payload sem revelar.",
-    blocks: "Leitura direta da intenção.",
-  },
-  {
-    name: "device_id",
-    purpose: "Aponta o dispositivo lógico depois da descriptografia.",
-    blocks: "Comando sem destino verificável.",
-  },
-  {
-    name: "amino_id",
-    purpose: "Troca strings livres por verbos conhecidos.",
-    blocks: "Comandos inventados ou ambíguos.",
-  },
-  {
-    name: "payload_type / payload_i32",
-    purpose: "Valida se o comando precisa de valor e qual tipo.",
-    blocks: "Payload fora do formato esperado.",
-  },
-];
-
-const timeline: TimelineItem[] = [
-  {
-    phase: "Build",
-    problem: "Imports, CMake e componentes do ESP-IDF quebrando a compilação.",
-    prompt: "Corrigir erros sem trocar a arquitetura.",
-    decision: "Adicionar dependências e includes mínimos.",
-    evidence: "Firmware voltou a compilar.",
-  },
-  {
-    phase: "Action Pill",
-    problem: "Como provar autoria e esconder a intenção ao mesmo tempo.",
-    prompt: "Separar Capsule Pill e Active Substance.",
-    decision: "CP assinado por fora, AS criptografado por dispositivo.",
-    evidence: "Guardian valida assinatura e abre AS com device_secret.",
-  },
-  {
-    phase: "G2G",
-    problem: "Guardians recebiam e repassavam com instabilidade BLE.",
-    prompt: "Analisar inbound/outbound e ordem do fluxo.",
-    decision: "Cache primeiro, relay depois, digestão pesada em seguida.",
-    evidence: "G1 repassa e G2 aciona o LED.",
-  },
-  {
-    phase: "Admin",
-    problem: "Configuração precisava ser temporária e autenticada.",
-    prompt: "Criar challenge assinado para liberar painel.",
-    decision: "Botão físico abre AP admin e assinatura libera UI.",
-    evidence: "Cadastro persiste e volta no modo normal.",
-  },
-];
-
-let currentLayer = 0;
-let currentPillTab: PillTab = "cp";
 
 const app = document.querySelector<HTMLDivElement>("#app");
-
 if (!app) {
-  throw new Error("App root não encontrado");
+  throw new Error("Root #app nao encontrado");
 }
+
+const navItems = slides
+  .map(
+    (slide) => `
+      <a class="step-link" href="#${slide.id}" data-target="${slide.id}">
+        <span>${slide.index}</span>
+        ${slide.eyebrow}
+      </a>
+    `,
+  )
+  .join("");
+
+const slideMarkup = slides
+  .map(
+    (slide) => `
+      <section class="slide" id="${slide.id}" data-slide="${slide.id}">
+        <div class="slide-shell">
+          <div class="slide-kicker">
+            <span>${slide.index}</span>
+            <strong>${slide.eyebrow}</strong>
+          </div>
+          <figure class="diagram-frame">
+            <img src="${slide.image}" alt="${slide.title}" loading="lazy" />
+          </figure>
+          <div class="details">
+            <p class="details-index">${slide.index} / ${String(slides.length).padStart(2, "0")}</p>
+            <h2>${slide.title}</h2>
+            <div class="detail-grid">
+              <article>
+                <h3>Problema</h3>
+                <p>${slide.problem}</p>
+              </article>
+              <article>
+                <h3>Solução</h3>
+                <p>${slide.solution}</p>
+              </article>
+              <article>
+                <h3>Por que importa</h3>
+                <p>${slide.why}</p>
+              </article>
+              ${
+                slide.limit
+                  ? `<article><h3>Limite honesto</h3><p>${slide.limit}</p></article>`
+                  : ""
+              }
+            </div>
+          </div>
+        </div>
+      </section>
+    `,
+  )
+  .join("");
 
 app.innerHTML = `
   <header class="topbar">
-    <a class="brand" href="#top" aria-label="Voltar ao início">
-      <span class="brand-mark">BN</span>
-      <span><strong>BlindNet</strong><small>IoT Security</small></span>
+    <a class="brand" href="#setup" aria-label="BlindNet inicio">
+      <span>BN</span>
+      <strong>BlindNet</strong>
     </a>
-    <nav class="topnav" aria-label="Navegação">
-      <a href="#layers">Camadas</a>
-      <a href="#pill">Pill</a>
-      <a href="#membrane">Membrane</a>
-      <a href="#g2g">G2G</a>
-      <a href="#transparency">IA</a>
+    <nav class="step-nav" aria-label="Etapas da apresentacao">
+      ${navItems}
+      <a class="step-link transparency-link" href="#transparencia" data-target="transparencia">
+        <span>IA</span>
+        Transparência
+      </a>
     </nav>
   </header>
 
-  <main id="top">
-    <section class="hero">
-      <canvas id="heroCanvas" aria-label="Visualização animada da rede BlindNet"></canvas>
-      <div class="hero-copy">
-        <p class="eyebrow">ESP32 · BLE · MQTT · criptografia · Guardians</p>
-        <h1>O que precisa ser verdade para um LED acender?</h1>
-        <p>Na BlindNet, acender um LED deixa de ser publicar um comando. A intenção precisa provar autoria, integridade, novidade, destino, segredo e permissão.</p>
-        <div class="hero-actions">
-          <a class="primary-action" href="#simulator">Explorar fluxo</a>
-          <a class="secondary-action" href="#transparency">Ver transparência</a>
-        </div>
-      </div>
+  <main class="deck" id="deck">
+    <section class="intro" id="inicio">
+      <p>Arquitetura de segurança para IoT local</p>
+      <h1>BlindNet</h1>
+      <span>Diagramas em tela cheia. Role para ver os detalhes de cada camada.</span>
+      <a href="#setup">Iniciar</a>
     </section>
 
-    <section class="metrics" aria-label="Resumo da apresentação">
-      <article><strong>CP + AS</strong><span>intenção assinada e opaca</span></article>
-      <article><strong>BLE/G2G</strong><span>plano de controle separado</span></article>
-      <article><strong>Membrane</strong><span>autenticidade não basta</span></article>
-      <article><strong>DoS</strong><span>limite honesto do protótipo</span></article>
-    </section>
+    ${slideMarkup}
 
-    <section id="simulator" class="section simulator-section">
-      <div class="section-head">
-        <span class="eyebrow">Simulador mobile</span>
-        <h2>A rede ganhando defesa, camada por camada</h2>
-        <p>Toque para atacar, adicionar proteção e ver o que muda no caminho entre app, Guardian, broker e dispositivo.</p>
-      </div>
+    
 
-      <div class="simulator-grid">
-        <div class="device-frame">
-          <div class="device-top">
-            <span id="scenarioTitle"></span>
-            <strong id="scenarioBadge"></strong>
-          </div>
-          <div id="networkMap" class="network-map">
-            <div class="map-line line-a"></div>
-            <div class="map-line line-b"></div>
-            <div class="map-line line-c"></div>
-            <div class="map-line line-d"></div>
-            <div class="map-node node-app">App</div>
-            <div class="map-node node-attacker">Scan</div>
-            <div class="map-node node-guardian">Guardian</div>
-            <div class="map-node node-broker">MQTT</div>
-            <div class="map-node node-device">LED</div>
-            <div class="moving-pill">PILL</div>
-          </div>
-          <div class="log-window" id="attackLog"></div>
-        </div>
-
-        <div class="control-panel">
-          <div class="progress-label">
-            <span>Camada atual</span>
-            <strong id="layerCount"></strong>
-          </div>
-          <div class="progress-track"><span id="layerProgress"></span></div>
-          <h3 id="layerTitle"></h3>
-          <p id="layerShort"></p>
-          <dl class="decision-list">
-            <div><dt>Bloqueia</dt><dd id="layerBlocks"></dd></div>
-            <div><dt>Ainda resta</dt><dd id="layerRemaining"></dd></div>
-          </dl>
-          <div class="button-row">
-            <button class="tool-button" id="attackButton" type="button">Atacar</button>
-            <button class="tool-button strong" id="nextLayerButton" type="button">Adicionar camada</button>
-          </div>
-        </div>
+    <section class="transparency" id="transparencia">
+      <div class="transparency-copy">
+        <p class="details-index">Transparência</p>
+        <h2>Uso de IA como ferramenta auditável</h2>
+        <p>
+          A IA foi utilizada como ferramenta de apoio em implementação, depuração,
+          organização visual e escrita técnica. As decisões de arquitetura,
+          integração, validação e testes em hardware foram documentadas para
+          permitir rastreabilidade do processo de desenvolvimento.
+        </p>
       </div>
-    </section>
-
-    <section id="layers" class="section">
-      <div class="section-head">
-        <span class="eyebrow">Mapa da arquitetura</span>
-        <h2>Por que cada peça existe</h2>
-        <p>Cada bloco reduz uma classe de ataque. O conjunto é o que transforma visibilidade em algo bem diferente de controle.</p>
+      <div class="transparency-diagrams">
+        <figure class="transparency-diagram">
+          <img src="${images.iaSupport}" alt="Mapa dos módulos em que a IA foi usada como apoio no desenvolvimento" />
+        </figure>
+        <figure class="transparency-diagram">
+          <img src="${images.iaTable}" alt="Tabela de transparência com apoio da IA, decisões humanas e evidências práticas" />
+        </figure>
       </div>
-      <div class="layer-list" id="layerList"></div>
-    </section>
-
-    <section id="pill" class="section dark">
-      <div class="section-head">
-        <span class="eyebrow">Action Pill</span>
-        <h2>CP prova a cápsula. AS esconde a intenção.</h2>
-        <p>A Action Pill é roteável sem revelar o comando. O Guardian valida o lacre antes de tentar digerir o conteúdo.</p>
-      </div>
-      <div class="pill-grid">
-        <div class="pill-orb" aria-hidden="true">
-          <button class="pill-half pill-cp active" data-pill-tab="cp" type="button"><strong>CP</strong><span>público · assinado</span></button>
-          <button class="pill-half pill-as" data-pill-tab="as" type="button"><strong>AS</strong><span>opaco · criptografado</span></button>
-        </div>
-        <div class="inspector">
-          <div class="tabs" role="tablist">
-            <button class="tab active" data-pill-tab="cp" type="button">CP</button>
-            <button class="tab" data-pill-tab="as" type="button">AS</button>
-            <button class="tab" data-pill-tab="why" type="button">Por quê</button>
-          </div>
-          <div id="pillInspector"></div>
-        </div>
-      </div>
-    </section>
-
-    <section id="membrane" class="section">
-      <div class="section-head">
-        <span class="eyebrow">Digestão local</span>
-        <h2>Ribosome, RNA e Amino Acids</h2>
-        <p>Mesmo depois da assinatura, a intenção só executa se o Guardian tiver o segredo e a Membrane permitir o verbo.</p>
-      </div>
-      <div class="cards">
-        <article><span>Ribosome</span><h3>Quem existe na zona</h3><p>Guarda mqtt_client_id, template_id, epoch e device_secret. O segredo fica no Guardian.</p></article>
-        <article><span>RNA/RNS</span><h3>Molde de comportamento</h3><p>Lâmpada aceita ON, OFF, TOGGLE e leitura. Sensor, porta e dimmer têm outros moldes.</p></article>
-        <article><span>Amino Acids</span><h3>Verbos normalizados</h3><p>Comandos viram IDs conhecidos em vez de strings arbitrárias.</p></article>
-        <article><span>Membrane</span><h3>Permissão final</h3><p>Assinatura prova autoria. Membrane prova se aquela ação é permitida naquele contexto.</p></article>
-      </div>
-    </section>
-
-    <section id="g2g" class="section g2g">
-      <div class="section-head">
-        <span class="eyebrow">Guardian-to-Guardian</span>
-        <h2>A intenção encontra quem consegue digerir</h2>
-        <p>O app pode enviar para um Guardian qualquer. A malha repassa a Action Pill opaca até o nó certo.</p>
-      </div>
-      <div class="relay">
-        <article><span>G1</span><strong>Recebe</strong><p>cache → relay → digestão local</p></article>
-        <div class="relay-path"><b></b><em>Action Pill opaca</em></div>
-        <article><span>G2</span><strong>Executa</strong><p>device_secret → membrane → MQTT → LED</p></article>
-      </div>
-    </section>
-
-    <section id="transparency" class="section transparency">
-      <div class="section-head">
-        <span class="eyebrow">Portal de transparência</span>
-        <h2>IA como ferramenta auditável</h2>
-        <p>O painel mostra prompts, decisões humanas, erros da IA e evidências reais. A autoria fica no processo de engenharia.</p>
-      </div>
-      <div class="transparency-grid">
-        <div class="bars" aria-label="Mapa de participação">
-          <div><span>Arquitetura</span><b style="--value: 88%"></b><em>decisão humana</em></div>
-          <div><span>Build</span><b style="--value: 72%"></b><em>depuração assistida</em></div>
-          <div><span>BLE/G2G</span><b style="--value: 84%"></b><em>hardware decidiu</em></div>
-          <div><span>Apresentação</span><b style="--value: 68%"></b><em>organização visual</em></div>
-        </div>
-        <div class="timeline" id="timeline"></div>
-      </div>
-    </section>
-
-    <section class="section closing">
-      <span class="eyebrow">Encerramento</span>
-      <h2>Parece só um LED. Não é só um LED.</h2>
-      <p>O LED acende porque uma cadeia de segurança funcionou em hardware real: BLE, cache, assinatura, AS, Ribosome, Membrane, G2G e MQTT local.</p>
-      <a class="primary-action" href="#top">Voltar ao início</a>
     </section>
   </main>
+
+  <div class="rotate-hint">
+    <strong>Vire o celular na horizontal</strong>
+    <p>Os diagramas foram desenhados para serem apresentados em paisagem.</p>
+  </div>
 `;
 
-const byId = <T extends HTMLElement>(id: string): T => {
-  const element = document.getElementById(id);
-  if (!element) {
-    throw new Error(`Elemento #${id} não encontrado`);
-  }
-  return element as T;
+const links = Array.from(document.querySelectorAll<HTMLAnchorElement>(".step-link"));
+const sections = Array.from(
+  document.querySelectorAll<HTMLElement>("[data-slide], .test-lab, .transparency"),
+);
+const deck = document.querySelector<HTMLElement>("#deck");
+const horizontalPages = Array.from(
+  document.querySelectorAll<HTMLElement>(".intro, [data-slide], .test-lab, .transparency"),
+);
+
+function nearestPageIndex(): number {
+  if (!deck) return 0;
+  const left = deck.scrollLeft;
+  let nearest = 0;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  horizontalPages.forEach((page, index) => {
+    const distance = Math.abs(page.offsetLeft - left);
+    if (distance < nearestDistance) {
+      nearest = index;
+      nearestDistance = distance;
+    }
+  });
+
+  return nearest;
+}
+
+function goToPage(index: number): void {
+  if (!deck) return;
+  const page = horizontalPages[Math.max(0, Math.min(index, horizontalPages.length - 1))];
+  if (!page) return;
+  deck.scrollTo({
+    left: page.offsetLeft,
+    behavior: "smooth",
+  });
+}
+
+document.querySelectorAll<HTMLAnchorElement>('a[href^="#"]').forEach((link) => {
+  link.addEventListener("click", (event) => {
+    const target = link.dataset.target ?? link.getAttribute("href")?.replace("#", "");
+    const section = target ? document.getElementById(target) : null;
+    if (!section || !deck) return;
+    event.preventDefault();
+    deck.scrollTo({
+      left: section.offsetLeft,
+      behavior: "smooth",
+    });
+  });
+});
+
+let touchStartX = 0;
+let touchStartY = 0;
+let touchStartTime = 0;
+
+deck?.addEventListener(
+  "touchstart",
+  (event) => {
+    const touch = event.touches[0];
+    if (!touch) return;
+    touchStartX = touch.clientX;
+    touchStartY = touch.clientY;
+    touchStartTime = performance.now();
+  },
+  { passive: true },
+);
+
+deck?.addEventListener(
+  "touchend",
+  (event) => {
+    const touch = event.changedTouches[0];
+    if (!touch) return;
+
+    const dx = touch.clientX - touchStartX;
+    const dy = touch.clientY - touchStartY;
+    const elapsed = performance.now() - touchStartTime;
+    const absX = Math.abs(dx);
+    const absY = Math.abs(dy);
+
+    const isIntentionalHorizontalSwipe = absX >= 120 && absX > absY * 1.55 && elapsed < 900;
+    if (!isIntentionalHorizontalSwipe) return;
+
+    event.preventDefault();
+    const current = nearestPageIndex();
+    goToPage(dx < 0 ? current + 1 : current - 1);
+  },
+  { passive: false },
+);
+
+const observer = new IntersectionObserver(
+  (entries) => {
+    const visible = entries
+      .filter((entry) => entry.isIntersecting)
+      .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+
+    if (!visible) return;
+    const id = visible.target.id;
+    links.forEach((link) => {
+      link.classList.toggle("active", link.dataset.target === id);
+    });
+  },
+  {
+    root: deck,
+    rootMargin: "0px -45% 0px -45%",
+    threshold: [0.2, 0.45, 0.7],
+  },
+);
+
+sections.forEach((section) => observer.observe(section));
+
+type DemoDevice = {
+  id: string;
+  deviceId: string;
+  label: string;
+  topic: string;
+  amino: string;
+  epoch: number;
+  hasSecret: boolean;
+  secretPreview?: string;
 };
 
-const scenarioTitle = byId<HTMLSpanElement>("scenarioTitle");
-const scenarioBadge = byId<HTMLElement>("scenarioBadge");
-const networkMap = byId<HTMLDivElement>("networkMap");
-const attackLog = byId<HTMLDivElement>("attackLog");
-const layerCount = byId<HTMLElement>("layerCount");
-const layerProgress = byId<HTMLSpanElement>("layerProgress");
-const layerTitle = byId<HTMLHeadingElement>("layerTitle");
-const layerShort = byId<HTMLParagraphElement>("layerShort");
-const layerBlocks = byId<HTMLElement>("layerBlocks");
-const layerRemaining = byId<HTMLElement>("layerRemaining");
-const attackButton = byId<HTMLButtonElement>("attackButton");
-const nextLayerButton = byId<HTMLButtonElement>("nextLayerButton");
-const layerList = byId<HTMLDivElement>("layerList");
-const pillInspector = byId<HTMLDivElement>("pillInspector");
-const timelineElement = byId<HTMLDivElement>("timeline");
+const bridgeStatus = document.querySelector<HTMLElement>("#bridgeStatus");
+const deviceGrid = document.querySelector<HTMLElement>("#deviceGrid");
 
-function renderLayer(): void {
-  const layer = layers[currentLayer];
-  scenarioTitle.textContent = layer.title;
-  scenarioBadge.textContent = layer.badge;
-  layerCount.textContent = `${currentLayer + 1}/${layers.length}`;
-  layerProgress.style.width = `${((currentLayer + 1) / layers.length) * 100}%`;
-  layerTitle.textContent = layer.title;
-  layerShort.textContent = layer.short;
-  layerBlocks.textContent = layer.blocks;
-  layerRemaining.textContent = layer.remaining;
-  attackLog.innerHTML = `<p>${layer.threat}</p>`;
-  networkMap.dataset.state = layer.mapState;
+function setBridgeStatus(text: string, state: "ok" | "warn" | "busy" = "ok"): void {
+  if (!bridgeStatus) return;
+  bridgeStatus.textContent = text;
+  bridgeStatus.dataset.state = state;
 }
 
-function renderLayerList(): void {
-  layerList.innerHTML = layers
-    .map(
-      (layer, index) => `
-        <button class="layer-item" type="button" data-layer="${index}">
-          <span>${String(index + 1).padStart(2, "0")}</span>
-          <strong>${layer.title}</strong>
-          <p>${layer.short}</p>
-        </button>
-      `,
-    )
-    .join("");
-
-  layerList.querySelectorAll<HTMLButtonElement>("[data-layer]").forEach((button) => {
-    button.addEventListener("click", () => {
-      currentLayer = Number(button.dataset.layer);
-      renderLayer();
-      document.getElementById("simulator")?.scrollIntoView({ behavior: "smooth" });
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 85000);
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        "content-type": "application/json",
+        ...(init?.headers ?? {}),
+      },
     });
-  });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+
+  const data = (await response.json()) as T & { ok?: boolean; error?: string };
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.error ?? "falha na ponte local");
+  }
+  return data;
 }
 
-function fieldList(fields: PillField[]): string {
-  return fields
+function renderDevices(devices: DemoDevice[]): void {
+  if (!deviceGrid) return;
+
+  if (devices.length === 0) {
+    deviceGrid.innerHTML = `
+      <article class="empty-devices">
+        <h3>Nenhum dispositivo cadastrado</h3>
+        <p>Edite a lista DEMO_DEVICES em Presentation/bridge/server.mjs e reinicie a ponte local.</p>
+      </article>
+    `;
+    return;
+  }
+
+  deviceGrid.innerHTML = devices
     .map(
-      (field) => `
-        <article class="field-row">
-          <h4>${field.name}</h4>
-          <p>${field.purpose}</p>
-          <small>${field.blocks}</small>
+      (device) => `
+        <article class="device-card" data-device-id="${device.id}">
+          <div>
+            <p>${device.id}</p>
+            <h3>${device.label}</h3>
+          </div>
+          <div class="device-actions">
+            <button type="button" data-action="send" data-device-id="${device.id}">
+              ${device.amino}
+            </button>
+          </div>
         </article>
       `,
     )
     .join("");
 }
 
-function renderPill(tab: PillTab): void {
-  currentPillTab = tab;
-  document.querySelectorAll<HTMLElement>("[data-pill-tab]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.pillTab === tab);
-  });
-
-  if (tab === "cp") {
-    pillInspector.innerHTML = `
-      <h3>Capsule Pill</h3>
-      <p>Envelope público, assinado e verificável. Ele prova que a cápsula não foi adulterada sem revelar o comando real.</p>
-      <div class="field-list">${fieldList(cpFields)}</div>
-    `;
-    return;
+async function loadDevices(): Promise<void> {
+  try {
+    const health = await api<{ ok: boolean }>("/api/health");
+    if (health.ok) {
+      setBridgeStatus("Ponte local conectada. Pronto para enviar Action Pills.", "ok");
+    }
+    const data = await api<{ devices: DemoDevice[] }>("/api/devices");
+    renderDevices(data.devices);
+  } catch (error) {
+    setBridgeStatus(
+      `Ponte local indisponível. Rode: npm run demo. Detalhe: ${(error as Error).message}`,
+      "warn",
+    );
+    renderDevices([]);
   }
+}
 
-  if (tab === "as") {
-    pillInspector.innerHTML = `
-      <h3>Active Substance</h3>
-      <p>Conteúdo criptografado que guarda device_id, tópico, amino acid e payload. Só o Guardian com device_secret consegue abrir.</p>
-      <div class="field-list">${fieldList(asFields)}</div>
-    `;
-    return;
+deviceGrid?.addEventListener("click", async (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-action]");
+  if (!button) return;
+
+  const deviceId = button.dataset.deviceId;
+  const action = button.dataset.action;
+  const card = button.closest<HTMLElement>(".device-card");
+  const output = card?.querySelector("pre");
+  if (!deviceId || !action) return;
+
+  button.disabled = true;
+  setBridgeStatus(`Enviando comando para ${deviceId}...`, "busy");
+  if (output) output.textContent = "gerando e enviando Action Pill...";
+
+  try {
+    const result = await api<{
+      ok: boolean;
+      queued?: boolean;
+      jobId?: string;
+      queueLength?: number;
+    }>("/api/send", {
+      method: "POST",
+      body: JSON.stringify({ id: deviceId }),
+    });
+    const queueText = result.queueLength ? ` Fila: ${result.queueLength}.` : "";
+    setBridgeStatus(`Comando de ${deviceId} enviado para a ponte.${queueText}`, "ok");
+    console.log("BlindNet send result", result);
+  } catch (error) {
+    setBridgeStatus(`Falha ao enviar para ${deviceId}.`, "warn");
+    console.error("BlindNet send error", error);
+  } finally {
+    button.disabled = false;
   }
-
-  pillInspector.innerHTML = `
-    <h3>Por que separar?</h3>
-    <p>CP responde se a cápsula é autêntica. AS responde qual é a intenção. Separar os dois permite relay opaco, validação cedo e execução apenas no Guardian certo.</p>
-    <div class="why-grid">
-      <span>Cache barato antes da digestão pesada</span>
-      <span>Relay sem revelar destino</span>
-      <span>Assinatura amarra o AS ao CP</span>
-      <span>Membrane decide depois da descriptografia</span>
-    </div>
-  `;
-}
-
-function renderTimeline(): void {
-  timelineElement.innerHTML = timeline
-    .map(
-      (item) => `
-        <article class="timeline-item">
-          <span>${item.phase}</span>
-          <h3>${item.problem}</h3>
-          <p><strong>Prompt:</strong> ${item.prompt}</p>
-          <p><strong>Decisão:</strong> ${item.decision}</p>
-          <small>${item.evidence}</small>
-        </article>
-      `,
-    )
-    .join("");
-}
-
-function initCanvas(): void {
-  const canvas = document.querySelector<HTMLCanvasElement>("#heroCanvas");
-  if (!canvas) return;
-
-  const context = canvas.getContext("2d");
-  if (!context) return;
-
-  const points = Array.from({ length: 18 }, (_, index) => ({
-    angle: (Math.PI * 2 * index) / 18,
-    radius: 80 + (index % 4) * 26,
-    speed: 0.0015 + (index % 5) * 0.00035,
-  }));
-
-  const resize = () => {
-    const rect = canvas.getBoundingClientRect();
-    const scale = window.devicePixelRatio || 1;
-    canvas.width = Math.floor(rect.width * scale);
-    canvas.height = Math.floor(rect.height * scale);
-    context.setTransform(scale, 0, 0, scale, 0, 0);
-  };
-
-  const draw = (time: number) => {
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
-    const centerX = width * 0.56;
-    const centerY = height * 0.5;
-
-    context.clearRect(0, 0, width, height);
-    context.fillStyle = "#0d1817";
-    context.fillRect(0, 0, width, height);
-
-    const nodes = points.map((point) => {
-      const angle = point.angle + time * point.speed;
-      return {
-        x: centerX + Math.cos(angle) * point.radius,
-        y: centerY + Math.sin(angle) * point.radius * 0.66,
-      };
-    });
-
-    context.lineWidth = 1;
-    nodes.forEach((node, index) => {
-      const next = nodes[(index + 5) % nodes.length];
-      context.strokeStyle = "rgba(141, 232, 209, 0.16)";
-      context.beginPath();
-      context.moveTo(node.x, node.y);
-      context.lineTo(next.x, next.y);
-      context.stroke();
-    });
-
-    nodes.forEach((node, index) => {
-      context.fillStyle = index % 4 === 0 ? "#f4c95d" : "#66dcc8";
-      context.globalAlpha = index % 4 === 0 ? 0.95 : 0.55;
-      context.beginPath();
-      context.arc(node.x, node.y, index % 4 === 0 ? 5 : 3, 0, Math.PI * 2);
-      context.fill();
-    });
-
-    context.globalAlpha = 1;
-    context.fillStyle = "rgba(255,255,255,0.94)";
-    context.font = "700 24px system-ui";
-    context.fillText("Guardian mesh", Math.max(20, width * 0.08), height - 54);
-    context.fillStyle = "rgba(255,255,255,0.64)";
-    context.font = "500 13px system-ui";
-    context.fillText("Action Pills via BLE/G2G", Math.max(20, width * 0.08), height - 30);
-
-    requestAnimationFrame(draw);
-  };
-
-  resize();
-  window.addEventListener("resize", resize);
-  requestAnimationFrame(draw);
-}
-
-attackButton.addEventListener("click", () => {
-  networkMap.classList.remove("attack-pulse");
-  window.setTimeout(() => networkMap.classList.add("attack-pulse"), 0);
 });
 
-nextLayerButton.addEventListener("click", () => {
-  currentLayer = (currentLayer + 1) % layers.length;
-  renderLayer();
-});
-
-document.querySelectorAll<HTMLButtonElement>("[data-pill-tab]").forEach((button) => {
-  button.addEventListener("click", () => {
-    renderPill(button.dataset.pillTab as PillTab);
-  });
-});
-
-renderLayer();
-renderLayerList();
-renderPill(currentPillTab);
-renderTimeline();
-initCanvas();
+loadDevices();
