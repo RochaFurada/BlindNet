@@ -6,10 +6,15 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc && vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "bridge": "node bridge/server.mjs",
+    "demo": "npm run build && node bridge/server.mjs"
   },
   "devDependencies": {
     "typescript": "^5.5.4",
     "vite": "^5.4.11"
+  },
+  "dependencies": {
+    "gsap": "^3.15.0"
   }
 }
