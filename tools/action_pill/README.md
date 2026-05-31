@@ -24,7 +24,7 @@ Suba `test_keys/issuer_public_key.pem` na tela de setup do ESP. O script tambem 
 ```powershell
 python tools/action_pill/send_action_pill_ble.py `
   --private-key C:\Users\Samue\Desktop\TrabalhoESP\BlindNet\tools\action_pill\test_keys/issuer_private_key.pem `
-  --device-secret 270b1b26e0e48fd1e0777cb5bb0aa907ce806f7f3da115cff69d08b3345b25ec`
+  --device-secret <device_secret>`
   --device-id lamp01 `
   --topic blindnet/lamp01/cmd `
   --amino TOGGLE
