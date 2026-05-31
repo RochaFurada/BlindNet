@@ -6,7 +6,6 @@ CMakeCache.txt
 cmake_install.cmake
 compile_commands.json
 action_pill.meta.json
-docs/
 
 # ESP-IDF generated files
 sdkconfig.old
